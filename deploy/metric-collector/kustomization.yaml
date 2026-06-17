@@ -6,4 +6,4 @@ resources:
 images:
   - name: ai-storage-metric-collector
     newName: ghcr.io/keti-ai-storage/ai-storage-metric-collector
-    newTag: latest
+    newTag: b1c2a35
