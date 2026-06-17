@@ -1,0 +1,74 @@
+# Caching 데모 전용 source PVC + seed Job.
+#
+# 목적: ai-storage-orchestrator/pkg/k8s/client.go:RunCachePrefetchPod 가
+#       mount 해서 prefetch python 스크립트를 실행할 _Bound 된 PVC_ 와
+#       그 안에 1 개 이상의 regular file 을 준비한다.
+#       파일이 0 개면 prefetch 스크립트가 SystemExit(3) 으로 실패한다.
+#
+# Author: 미정
+# Created: 2026-05-26
+# Related: ai-storage-orchestrator/pkg/k8s/client.go:1416 (cache-prefetch pod)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: demo-cache-source
+  namespace: ope-model-verify
+  labels:
+    demo.keti.io/component: caching
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # WHY: 클러스터에 존재하는 SC 4종(storage-archive/burst/capacity/performance) 중
+  #      범용 capacity tier 를 사용한다. WaitForFirstConsumer 모드라 seed Job 이
+  #      mount 되는 시점에 자동 Bound 된다.
+  storageClassName: storage-capacity
+  resources:
+    requests:
+      storage: 1Gi
+---
+# WHY: prefetch 스크립트는 sourcePath(/data 하위)에서 regular file 1 개 이상을 요구한다.
+#      Job 으로 seed file 을 한 번만 채워 둔다(완료 후 Pod 종료).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-cache-source-seed
+  namespace: ope-model-verify
+  labels:
+    demo.keti.io/component: caching
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        demo.keti.io/component: caching
+      # WHY: insight-trace 사이드카가 webhook 으로 주입되면 seed 컨테이너가 종료해도
+      #      사이드카가 살아남아 Job 이 영원히 Completed 되지 않는다. annotation 으로
+      #      main container 를 명시해 사이드카가 자동 종료되도록 한다.
+      annotations:
+        insight-trace.keti.io/main-container: "seed"
+        mlops.keti.io/main-container: "seed"
+        workload.keti.io/main-container: "seed"
+    spec:
+      restartPolicy: OnFailure
+      # WHY: 사이드카가 자기 Pod 상태를 polling 하려면 RBAC 권한이 필요하다.
+      serviceAccountName: ai-storage-orchestrator
+      containers:
+        - name: seed
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # WHY: prefetch 검사용 dummy 파일을 /data 하위에 채운다.
+              set -e
+              mkdir -p /data/seed
+              for i in 1 2 3; do
+                dd if=/dev/zero of="/data/seed/file-${i}.bin" bs=4K count=1 status=none
+              done
+              ls -lR /data
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: demo-cache-source

@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-integration-test
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    # GitHub Repository URL (여기를 수정하세요)
+    repoURL: https://github.com/YOUR_USERNAME/keti-ai-storage-test.git
+    targetRevision: main
+    path: workloads  # kustomization.yaml이 있는 경로
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ai-workload-test
+
+  syncPolicy:
+    automated:
+      prune: true      # GitHub에서 삭제하면 클러스터에서도 삭제
+      selfHeal: true   # 수동 변경 시 자동 복구
+    syncOptions:
+      - CreateNamespace=true
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

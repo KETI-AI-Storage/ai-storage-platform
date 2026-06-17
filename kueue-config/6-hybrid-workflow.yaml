@@ -1,0 +1,161 @@
+# =============================================================================
+# 하이브리드 접근: Argo Workflow + PyTorchJob + Kueue
+# =============================================================================
+# Argo Workflow가 PyTorchJob을 생성하면, Kueue가 해당 Job을 관리합니다.
+# 이렇게 하면 파이프라인의 유연성과 Kueue의 큐잉 기능을 모두 사용할 수 있습니다.
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: llama-pipeline-with-kueue-
+  namespace: kubeflow-user-example-com
+spec:
+  entrypoint: ml-pipeline
+  serviceAccountName: default-editor
+
+  templates:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 메인 파이프라인 DAG
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: ml-pipeline
+    dag:
+      tasks:
+      # Step 1: 전처리 (일반 Pod - AI Storage Scheduler만 사용)
+      - name: preprocess
+        template: preprocess-step
+
+      # Step 2: 학습 (PyTorchJob - Kueue + AI Storage Scheduler)
+      - name: train
+        template: create-training-job
+        dependencies: [preprocess]
+
+      # Step 3: 학습 완료 대기
+      - name: wait-training
+        template: wait-for-training
+        dependencies: [train]
+
+      # Step 4: 평가 (일반 Pod)
+      - name: evaluate
+        template: evaluate-step
+        dependencies: [wait-training]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Step 1: 전처리 (일반 컨테이너)
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: preprocess-step
+    metadata:
+      annotations:
+        ai-storage.keti/preprocessing-type: "tokenization"
+        ai-storage.keti/io-pattern: "read-heavy"
+    container:
+      image: python:3.9-slim
+      command: [python, -c]
+      args:
+      - |
+        print("=" * 50)
+        print("Step 1: Preprocessing")
+        print("=" * 50)
+        import time
+        print("Tokenizing dataset...")
+        time.sleep(5)
+        print("Preprocessing complete!")
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Step 2: PyTorchJob 생성 (Kueue가 관리!)
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: create-training-job
+    resource:
+      action: create
+      manifest: |
+        apiVersion: kubeflow.org/v1
+        kind: PyTorchJob
+        metadata:
+          generateName: llama-training-
+          namespace: kubeflow-user-example-com
+          labels:
+            # ⭐ 핵심: Kueue 연동 레이블
+            kueue.x-k8s.io/queue-name: ai-storage-queue
+            workflow: "{{workflow.name}}"
+        spec:
+          pytorchReplicaSpecs:
+            Master:
+              replicas: 1
+              restartPolicy: OnFailure
+              template:
+                metadata:
+                  annotations:
+                    ai-storage.keti/preprocessing-type: "training"
+                    ai-storage.keti/io-pattern: "read-heavy"
+                spec:
+                  schedulerName: ai-storage-scheduler
+                  containers:
+                  - name: pytorch
+                    image: python:3.9-slim
+                    command: [python, -c]
+                    args:
+                    - |
+                      print("=" * 50)
+                      print("Step 2: Training (Kueue Managed)")
+                      print("=" * 50)
+                      import time
+                      for epoch in range(3):
+                          print(f"Epoch {epoch+1}/3...")
+                          time.sleep(10)
+                      print("Training complete!")
+                    resources:
+                      requests:
+                        cpu: "500m"
+                        memory: "512Mi"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Step 3: 학습 Job 완료 대기
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: wait-for-training
+    container:
+      image: bitnami/kubectl:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "Waiting for PyTorchJob to complete..."
+        # workflow 레이블로 해당 PyTorchJob 찾기
+        while true; do
+          STATUS=$(kubectl get pytorchjobs -n kubeflow-user-example-com \
+            -l workflow={{workflow.name}} \
+            -o jsonpath='{.items[0].status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null)
+          if [ "$STATUS" = "True" ]; then
+            echo "Training completed successfully!"
+            break
+          fi
+          FAILED=$(kubectl get pytorchjobs -n kubeflow-user-example-com \
+            -l workflow={{workflow.name}} \
+            -o jsonpath='{.items[0].status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
+          if [ "$FAILED" = "True" ]; then
+            echo "Training failed!"
+            exit 1
+          fi
+          echo "Still training... waiting 10s"
+          sleep 10
+        done
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Step 4: 평가
+  # ─────────────────────────────────────────────────────────────────────────
+  - name: evaluate-step
+    container:
+      image: python:3.9-slim
+      command: [python, -c]
+      args:
+      - |
+        print("=" * 50)
+        print("Step 4: Evaluation")
+        print("=" * 50)
+        import time
+        print("Evaluating model...")
+        time.sleep(5)
+        print("Accuracy: 95.2%")
+        print("Pipeline complete!")

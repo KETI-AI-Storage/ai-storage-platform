@@ -1,0 +1,130 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keti
+  labels:
+    name: keti
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: insight-scope
+  namespace: keti
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: insight-scope
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: insight-scope
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: insight-scope
+subjects:
+  - kind: ServiceAccount
+    name: insight-scope
+    namespace: keti
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: insight-scope
+  namespace: keti
+  labels:
+    app: insight-scope
+    component: keti-apollo
+spec:
+  selector:
+    matchLabels:
+      app: insight-scope
+  template:
+    metadata:
+      labels:
+        app: insight-scope
+        component: keti-apollo
+    spec:
+      serviceAccountName: insight-scope
+      containers:
+        - name: insight-scope
+          image: ketidevit2/insight-scope:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9092
+              name: http
+            - containerPort: 50054
+              name: grpc
+          env:
+            - name: HTTP_PORT
+              value: "9092"
+            - name: GRPC_PORT
+              value: "50054"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: ENABLE_FORECASTER
+              value: "true"
+            # Node metrics history → Insight Hub (persistent). Forecaster pulls from hub.
+            - name: INSIGHT_HUB_ENDPOINT
+              value: "insight-hub.keti.svc.cluster.local:50056"
+            # Pod 단위 메트릭(라벨 일치 Pod만) — Hub에 pod_namespace/pod_name 으로 저장되어 노드 집계와 구분됨
+            - name: POD_METRICS_LABEL_SELECTOR
+              value: "app=preprocessing-workload"
+            # Forecast / PeakIdle RPCs still use Forecaster
+            - name: FORECASTER_ENDPOINT
+              value: "node-resource-forecaster.apollo.svc.cluster.local:50055"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9092
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9092
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: insight-scope
+  namespace: keti
+  labels:
+    app: insight-scope
+spec:
+  clusterIP: None  # Headless service for DaemonSet
+  selector:
+    app: insight-scope
+  ports:
+    - name: http
+      port: 9092
+      targetPort: 9092
+    - name: grpc
+      port: 50054
+      targetPort: 50054

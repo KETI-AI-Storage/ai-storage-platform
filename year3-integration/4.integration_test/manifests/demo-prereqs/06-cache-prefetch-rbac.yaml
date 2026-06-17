@@ -1,0 +1,44 @@
+# cache-prefetch Pod 의 ServiceAccount 와 self-pod-get 권한 정의.
+#
+# WHY:
+#   - ai-storage-orchestrator 가 caching 정책 실행 시 ope-model-verify 네임스페이스에
+#     cache-prefetch-* Pod 을 띄우고, 그 Pod 에 insight-trace 사이드카가 mutating
+#     webhook 으로 주입된다.
+#   - 사이드카는 자기 Pod 의 containerStatuses 를 Kubernetes API 로 polling 하여
+#     main container 종료를 감지한다. 권한이 없으면 polling 이 매번 실패해 사이드카가
+#     영원히 살아남고 Pod 이 Completed 되지 못한다.
+#   - cache-prefetch Pod 은 spec.serviceAccountName="ai-storage-orchestrator" 로 만들어진다.
+#     동명 SA 가 ope-model-verify 에 없으면 default SA 로 대체되어 권한이 깨진다.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-storage-orchestrator
+  namespace: ope-model-verify
+  labels:
+    app.kubernetes.io/component: caching-prefetch
+    app.kubernetes.io/part-of: ai-storage-orchestrator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-storage-orchestrator-self-pod-get
+  namespace: ope-model-verify
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/status"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-storage-orchestrator-self-pod-get
+  namespace: ope-model-verify
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ai-storage-orchestrator-self-pod-get
+subjects:
+  - kind: ServiceAccount
+    name: ai-storage-orchestrator
+    namespace: ope-model-verify

@@ -1,0 +1,75 @@
+# CIFAR-10 검증에서 사용한 논리 tier StorageClass 정의.
+#
+# Author: 미정 <unknown@example.com>
+# Created: 2026-05-28
+#
+# 주의: 아래 네 StorageClass는 동일 provisioner를 사용한다. 물리 tier 분리는
+# 별도 provisioner, CSI, NFS export, 또는 backend 매핑이 필요하다.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-l1
+  labels:
+    storage.keti.io/gluesys-tier: "true"
+    storage.keti.io/tier: L1
+    storage.keti.io/tier-role: cache-burst
+provisioner: cluster.local/nfs-subdir-external-provisioner
+parameters:
+  dataClass: cache
+  tier: L1
+  tierRole: cache-burst
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-l2
+  labels:
+    storage.keti.io/gluesys-tier: "true"
+    storage.keti.io/tier: L2
+    storage.keti.io/tier-role: nvme-hot
+provisioner: cluster.local/nfs-subdir-external-provisioner
+parameters:
+  dataClass: hot
+  tier: L2
+  tierRole: nvme-hot
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-l3
+  labels:
+    storage.keti.io/gluesys-tier: "true"
+    storage.keti.io/tier: L3
+    storage.keti.io/tier-role: hdd-capacity
+provisioner: cluster.local/nfs-subdir-external-provisioner
+parameters:
+  dataClass: warm-cold
+  tier: L3
+  tierRole: hdd-capacity
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-s3
+  labels:
+    storage.keti.io/gluesys-tier: "true"
+    storage.keti.io/tier: S3
+    storage.keti.io/tier-role: object-archive
+provisioner: cluster.local/nfs-subdir-external-provisioner
+parameters:
+  dataClass: archive
+  tier: S3
+  tierRole: object-archive
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

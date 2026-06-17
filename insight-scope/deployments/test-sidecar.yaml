@@ -1,0 +1,130 @@
+# ============================================
+# Insight Trace Sidecar 테스트 Pod
+# KETI AI Storage System
+# ============================================
+# 사용법:
+#   kubectl apply -f test-sidecar.yaml
+#   kubectl logs -f test-sidecar-pod -c insight-trace
+#   kubectl delete -f test-sidecar.yaml
+# ============================================
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-sidecar-pod
+  namespace: default
+  labels:
+    app: test-sidecar
+    component: keti-apollo
+spec:
+  # KETI AI Storage 커스텀 스케줄러 사용
+  schedulerName: ai-storage-scheduler
+
+  containers:
+  # 1. 메인 앱 컨테이너 (테스트용 nginx)
+  - name: main-app
+    image: nginx:alpine
+    ports:
+    - containerPort: 80
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # 2. Insight Trace 사이드카
+  - name: insight-trace
+    image: ketidevit2/insight-trace:latest
+    env:
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: SIDECAR_PORT
+      value: "9090"
+    - name: GRPC_PORT
+      value: "9091"
+    - name: METRICS_INTERVAL
+      value: "5s"
+    - name: REPORT_INTERVAL
+      value: "30s"
+    ports:
+    - name: http
+      containerPort: 9090
+    - name: grpc
+      containerPort: 9091
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "100m"
+        memory: "128Mi"
+
+  restartPolicy: Always
+---
+# ============================================
+# AI 워크로드 테스트 (PyTorch 시뮬레이션)
+# ============================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-ai-workload-sidecar
+  namespace: default
+  labels:
+    app: ai-workload-test
+    workload-type: training
+    component: keti-apollo
+spec:
+  schedulerName: ai-storage-scheduler
+
+  containers:
+  # 1. AI 워크로드 시뮬레이션 (CPU 부하 생성)
+  - name: ai-training
+    image: busybox:latest
+    command:
+    - /bin/sh
+    - -c
+    - |
+      echo "Starting AI training simulation..."
+      while true; do
+        # CPU 부하 시뮬레이션 (5초간 계산)
+        echo "Epoch running..."
+        dd if=/dev/zero of=/dev/null bs=1M count=100 2>/dev/null
+        sleep 5
+      done
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+  # 2. Insight Trace 사이드카
+  - name: insight-trace
+    image: ketidevit2/insight-trace:latest
+    env:
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "100m"
+        memory: "128Mi"
+
+  restartPolicy: Always

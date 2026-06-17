@@ -1,0 +1,187 @@
+###############################################################################
+# LLaMA Training Workload
+# - Type: TEXT (NLP)
+# - Framework: PyTorch + HuggingFace
+# - Stage: Training
+# - 충분히 오래 실행되어 insight-trace가 타입을 감지할 수 있도록 함
+###############################################################################
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: llama-training
+  namespace: ai-workload-test
+  labels:
+    app: llama-training
+    workload-type: text
+    framework: pytorch
+    stage: training
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: llama-training
+        workload-type: text
+        framework: pytorch
+    spec:
+      schedulerName: ai-storage-scheduler
+
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+      # 프로세스 네임스페이스 공유 - insight-trace가 메인 컨테이너 프로세스 감지
+      shareProcessNamespace: true
+
+      containers:
+      #=========================================================================
+      # Main Training Container
+      #=========================================================================
+      - name: training
+        image: python:3.11-slim
+        command:
+        - python3
+        - -c
+        - |
+          import time
+          import sys
+          import os
+          import random
+
+          # 프로세스 이름 설정 - insight-trace가 감지할 키워드 포함
+          sys.argv[0] = 'llama_pytorch_huggingface_trainer.py'
+
+          print("=" * 60)
+          print("KETI AI Storage - LLaMA Training Workload")
+          print("=" * 60)
+          print(f"Framework: PyTorch + HuggingFace Transformers")
+          print(f"Model: LLaMA-7B (Simulated)")
+          print(f"Task: Text Generation Training")
+          print("=" * 60)
+
+          # 학습 설정
+          EPOCHS = 10
+          STEPS_PER_EPOCH = 50
+          CHECKPOINT_INTERVAL = 100
+
+          os.makedirs('/data/checkpoints', exist_ok=True)
+          os.makedirs('/data/logs', exist_ok=True)
+
+          total_steps = 0
+          for epoch in range(EPOCHS):
+              print(f"\n[Epoch {epoch+1}/{EPOCHS}] Starting...")
+              epoch_loss = 0
+
+              for step in range(STEPS_PER_EPOCH):
+                  total_steps += 1
+
+                  # 학습 시뮬레이션 (I/O 포함)
+                  loss = 2.5 - (total_steps * 0.004) + random.uniform(-0.1, 0.1)
+                  epoch_loss += loss
+
+                  # 로그 파일 쓰기 (Write I/O)
+                  with open('/data/logs/training.log', 'a') as f:
+                      f.write(f"step={total_steps},loss={loss:.4f},lr=0.0001\n")
+
+                  # 텐서 데이터 시뮬레이션 (Read/Write I/O)
+                  with open(f'/data/batch_{step % 10}.bin', 'wb') as f:
+                      f.write(os.urandom(1024 * 1024))  # 1MB
+
+                  if total_steps % 25 == 0:
+                      print(f"  Step {total_steps}: loss={loss:.4f}")
+
+                  # 체크포인트 저장
+                  if total_steps % CHECKPOINT_INTERVAL == 0:
+                      ckpt_path = f'/data/checkpoints/llama_step_{total_steps}.pt'
+                      print(f"  Saving checkpoint: {ckpt_path}")
+                      with open(ckpt_path, 'wb') as f:
+                          f.write(os.urandom(10 * 1024 * 1024))  # 10MB checkpoint
+
+                  time.sleep(3)  # 3초 간격
+
+              avg_loss = epoch_loss / STEPS_PER_EPOCH
+              print(f"[Epoch {epoch+1}] Completed - Avg Loss: {avg_loss:.4f}")
+
+          print("\n" + "=" * 60)
+          print("Training completed!")
+          print(f"Total steps: {total_steps}")
+          print("=" * 60)
+
+          # 최종 메트릭 리포트 대기
+          print("Waiting for final metrics report...")
+          time.sleep(120)
+
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "2000m"
+            memory: "2Gi"
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+
+      #=========================================================================
+      # Insight-Trace Sidecar
+      #=========================================================================
+      - name: insight-trace
+        image: ketidevit2/insight-trace:latest
+        imagePullPolicy: Always
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: APOLLO_ENDPOINT
+          value: "apollo-policy-server.keti.svc.cluster.local:50051"
+        - name: METRICS_INTERVAL
+          value: "5s"
+        - name: ANALYSIS_INTERVAL
+          value: "10s"
+        - name: REPORT_INTERVAL
+          value: "30s"
+        - name: IS_PIPELINE
+          value: "false"
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+          readOnly: true
+        - name: podinfo
+          mountPath: /etc/podinfo
+          readOnly: true
+
+      volumes:
+      - name: data-volume
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: podinfo
+        downwardAPI:
+          items:
+          - path: "labels"
+            fieldRef:
+              fieldPath: metadata.labels
+          - path: "annotations"
+            fieldRef:
+              fieldPath: metadata.annotations
+
+      restartPolicy: Never

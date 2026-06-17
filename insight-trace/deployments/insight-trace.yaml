@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keti
+  labels:
+    name: keti
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: insight-trace
+  namespace: keti
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: insight-trace-pod-status-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: insight-trace-pod-status-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: insight-trace-pod-status-reader
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insight-trace
+  namespace: keti
+  labels:
+    app: insight-trace
+    component: keti-apollo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: insight-trace
+  template:
+    metadata:
+      labels:
+        app: insight-trace
+        component: keti-apollo
+    spec:
+      serviceAccountName: insight-trace
+      containers:
+        - name: insight-trace
+          image: ketidevit2/insight-trace:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 9090
+            - name: grpc
+              containerPort: 9091
+          env:
+            - name: SIDECAR_PORT
+              value: "9090"
+            - name: GRPC_PORT
+              value: "9091"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CONTAINER_NAME
+              value: "insight-trace"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: APOLLO_ENDPOINT
+              value: "apollo-policy-server.keti.svc.cluster.local:50051"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: insight-trace
+  namespace: keti
+  labels:
+    app: insight-trace
+spec:
+  selector:
+    app: insight-trace
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+    - name: grpc
+      port: 9091
+      targetPort: grpc

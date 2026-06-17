@@ -1,0 +1,484 @@
+###############################################################################
+# [조합 G] ETRI 옵티머스 + KETI AI Storage 풀 통합 파이프라인
+#
+# 통합 컴포넌트:
+#   - Argo Workflows: DAG 파이프라인 실행 엔진
+#   - Kubeflow Training Operator: PyTorchJob 분산 학습
+#   - Kueue: 리소스 큐잉 및 Gang Scheduling
+#   - KETI AI Storage Scheduler: 스토리지 인지 스케줄링
+#   - Insight-Trace: APOLLO 워크로드 I/O 모니터링 사이드카
+#
+# 파이프라인 구조:
+#   preprocess (데이터 전처리)
+#       → train (분산 학습 - PyTorchJob + Kueue)
+#           → evaluate (모델 평가)
+#               → archive (결과 저장)
+#
+# 워크로드 특성 자동 감지:
+#   Insight-Trace 사이드카가 실시간 I/O 패턴을 분석하여 APOLLO에 전송하고,
+#   AI Storage Scheduler가 스케줄링 시점에 APOLLO로부터 직접 조회합니다.
+#   (io-pattern, preprocessing-type, workload-stage 등 수동 입력 불필요)
+#
+# 사용자 필수 입력 필드:
+#   - schedulerName: ai-storage-scheduler    → K8s가 커스텀 스케줄러로 라우팅
+#   - kueue.x-k8s.io/queue-name             → Kueue 큐 지정 (PyTorchJob만)
+#   - gang-group / role                      → Gang Scheduling 그룹 식별
+#   - Insight-Trace 사이드카 컨테이너        → APOLLO 데이터 수집원
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: optimus-pipeline-
+  namespace: kubeflow-user-example-com
+  labels:
+    app: optimus-full-integration
+    project: keti-etri-integration
+spec:
+  entrypoint: optimus-pipeline
+  serviceAccountName: default-editor
+
+  # 파이프라인 공유 볼륨
+  volumes:
+  - name: pipeline-data
+    persistentVolumeClaim:
+      claimName: optimus-pipeline-data      # 스테이지 간 데이터 공유
+  - name: model-output
+    emptyDir:
+      sizeLimit: 1Gi
+
+  ###########################################################################
+  # 메인 DAG 파이프라인
+  ###########################################################################
+  templates:
+  - name: optimus-pipeline
+    dag:
+      tasks:
+      - name: preprocess
+        template: preprocess-step
+
+      - name: train
+        template: create-pytorchjob
+        dependencies: [preprocess]
+
+      - name: evaluate
+        template: evaluate-step
+        dependencies: [train]
+
+      - name: archive
+        template: archive-step
+        dependencies: [evaluate]
+
+  ###########################################################################
+  # Step 1: 데이터 전처리 (Argo 컨테이너)
+  #
+  # APOLLO 자동 감지 항목:
+  #   - io-pattern, preprocessing-type, workload-stage
+  #   → Insight-Trace 사이드카가 실시간 분석 후 APOLLO에 전송
+  #   → 스케줄러가 APOLLO에서 조회하여 최적 노드 선택
+  ###########################################################################
+  - name: preprocess-step
+    schedulerName: ai-storage-scheduler                            # [필수] 커스텀 스케줄러
+    tolerations:
+    - operator: Exists
+    container:
+      name: main
+      image: ketidevit2/optimus-preprocess:latest                  # ETRI 옵티머스 전처리 이미지
+      command: [python3, -c]
+      args:
+      - |
+        import time, os
+        print("=" * 60)
+        print("[Step 1] ETRI Optimus - Data Preprocessing (Augmentation)")
+        print(f"  Node: {os.environ.get('NODE_NAME', 'unknown')}")
+        print(f"  Scheduler: ai-storage-scheduler")
+        print("=" * 60)
+
+        stages = ['load_dataset', 'augment', 'tokenize', 'save_processed']
+        for stage in stages:
+            print(f"  Processing: {stage}...")
+            time.sleep(5)
+
+        print("[Step 1] Preprocessing DONE!")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data
+    # Insight-Trace 사이드카: I/O 패턴 분석 → APOLLO 전송
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      - name: CONTAINER_NAME
+        value: "main"
+      - name: APOLLO_ENDPOINT
+        value: "apollo-policy-server.keti.svc.cluster.local:50051"
+      - name: METRICS_INTERVAL_SECONDS
+        value: "5"
+      - name: ANALYSIS_INTERVAL_SECONDS
+        value: "10"
+      - name: REPORT_INTERVAL_SECONDS
+        value: "15"
+      resources:
+        requests:
+          cpu: "20m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
+
+  ###########################################################################
+  # Step 2: 분산 학습 (PyTorchJob + Kueue + Gang Scheduling)
+  #
+  # Kueue 동작:
+  #   - ai-storage-queue의 리소스 쿼터 내에서 스케줄링
+  #   - Gang Scheduling: Master + Worker 동시 배치
+  #
+  # APOLLO 자동 감지 항목:
+  #   - io-pattern, preprocessing-type, workload-stage, workload-type
+  #   → Insight-Trace 사이드카가 분석 후 APOLLO에 전송
+  ###########################################################################
+  - name: create-pytorchjob
+    resource:
+      action: create
+      successCondition: status.replicaStatuses.Master.succeeded > 0
+      failureCondition: status.replicaStatuses.Master.failed > 0
+      manifest: |
+        apiVersion: kubeflow.org/v1
+        kind: PyTorchJob
+        metadata:
+          generateName: optimus-train-
+          namespace: kubeflow-user-example-com
+          labels:
+            kueue.x-k8s.io/queue-name: ai-storage-queue           # [필수] Kueue 큐 지정
+            workflow-name: "{{workflow.name}}"
+            project: keti-etri-integration
+        spec:
+          pytorchReplicaSpecs:
+            ################################################################
+            # Master 노드
+            ################################################################
+            Master:
+              replicas: 1
+              restartPolicy: OnFailure
+              template:
+                metadata:
+                  labels:
+                    gang-group: optimus-training                   # [필수] Gang Scheduling 그룹
+                    role: master                                   # [필수] 역할 식별
+                spec:
+                  schedulerName: ai-storage-scheduler              # [필수] 커스텀 스케줄러
+                  shareProcessNamespace: true                      # [필수] 사이드카 프로세스 모니터링용
+                  tolerations:
+                  - operator: Exists
+                  containers:
+                  # ETRI 옵티머스 학습 컨테이너
+                  - name: pytorch
+                    image: ketidevit2/optimus-training:latest
+                    command: [python3, -c]
+                    args:
+                    - |
+                      import time, os, random
+                      print("=" * 60)
+                      print("[Step 2] ETRI Optimus - Distributed Training (Master)")
+                      print(f"  Node: {os.environ.get('HOSTNAME', 'unknown')}")
+                      print(f"  Managed by: Kueue (ai-storage-queue)")
+                      print(f"  Scheduled by: ai-storage-scheduler")
+                      print("=" * 60)
+
+                      for epoch in range(3):
+                          print(f"\n  Epoch {epoch+1}/3")
+                          for step in range(5):
+                              loss = 2.5 - epoch*0.5 - step*0.08 + random.uniform(-0.05, 0.05)
+                              print(f"    Step {step+1}: loss={loss:.4f}")
+                              time.sleep(3)
+
+                      print("\n[Step 2] Training DONE! (Master)")
+                    resources:
+                      requests:
+                        cpu: "1"
+                        memory: "2Gi"
+                    volumeMounts:
+                    - name: pipeline-data
+                      mountPath: /data
+                    - name: checkpoint
+                      mountPath: /checkpoints
+                  # Insight-Trace 사이드카: I/O 패턴 분석 → APOLLO 전송
+                  - name: insight-trace
+                    image: ketidevit2/insight-trace:latest
+                    env:
+                    - name: POD_NAME
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.name
+                    - name: POD_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.namespace
+                    - name: NODE_NAME
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: spec.nodeName
+                    - name: CONTAINER_NAME
+                      value: "pytorch"
+                    - name: APOLLO_ENDPOINT
+                      value: "apollo-policy-server.keti.svc.cluster.local:50051"
+                    - name: METRICS_INTERVAL_SECONDS
+                      value: "5"
+                    resources:
+                      requests:
+                        cpu: "20m"
+                        memory: "32Mi"
+                      limits:
+                        cpu: "100m"
+                        memory: "64Mi"
+                  volumes:
+                  - name: pipeline-data
+                    persistentVolumeClaim:
+                      claimName: optimus-pipeline-data
+                  - name: checkpoint
+                    emptyDir:
+                      sizeLimit: 500Mi
+
+            ################################################################
+            # Worker 노드 (2대)
+            ################################################################
+            Worker:
+              replicas: 2
+              restartPolicy: OnFailure
+              template:
+                metadata:
+                  labels:
+                    gang-group: optimus-training                   # [필수] 같은 Gang 그룹
+                    role: worker                                   # [필수] 역할 식별
+                spec:
+                  schedulerName: ai-storage-scheduler              # [필수] 커스텀 스케줄러
+                  shareProcessNamespace: true
+                  tolerations:
+                  - operator: Exists
+                  containers:
+                  - name: pytorch
+                    image: ketidevit2/optimus-training:latest
+                    command: [python3, -c]
+                    args:
+                    - |
+                      import time, os, random
+                      print("=" * 60)
+                      print("[Step 2] ETRI Optimus - Distributed Training (Worker)")
+                      print(f"  Node: {os.environ.get('HOSTNAME', 'unknown')}")
+                      print("=" * 60)
+
+                      for epoch in range(3):
+                          print(f"\n  Epoch {epoch+1}/3")
+                          for step in range(5):
+                              print(f"    Step {step+1}: gradient sync...")
+                              time.sleep(3)
+
+                      print("\n[Step 2] Training DONE! (Worker)")
+                    resources:
+                      requests:
+                        cpu: "1"
+                        memory: "2Gi"
+                    volumeMounts:
+                    - name: pipeline-data
+                      mountPath: /data
+                      readOnly: true
+                  # Insight-Trace 사이드카
+                  - name: insight-trace
+                    image: ketidevit2/insight-trace:latest
+                    env:
+                    - name: POD_NAME
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.name
+                    - name: POD_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.namespace
+                    - name: NODE_NAME
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: spec.nodeName
+                    - name: CONTAINER_NAME
+                      value: "pytorch"
+                    - name: APOLLO_ENDPOINT
+                      value: "apollo-policy-server.keti.svc.cluster.local:50051"
+                    - name: METRICS_INTERVAL_SECONDS
+                      value: "5"
+                    resources:
+                      requests:
+                        cpu: "20m"
+                        memory: "32Mi"
+                      limits:
+                        cpu: "100m"
+                        memory: "64Mi"
+                  volumes:
+                  - name: pipeline-data
+                    persistentVolumeClaim:
+                      claimName: optimus-pipeline-data
+
+  ###########################################################################
+  # Step 3: 모델 평가 (Argo 컨테이너)
+  #
+  # APOLLO 자동 감지: io-pattern, workload-stage 등
+  ###########################################################################
+  - name: evaluate-step
+    schedulerName: ai-storage-scheduler                            # [필수] 커스텀 스케줄러
+    tolerations:
+    - operator: Exists
+    container:
+      name: main
+      image: ketidevit2/optimus-evaluate:latest
+      command: [python3, -c]
+      args:
+      - |
+        import time, os, random
+        print("=" * 60)
+        print("[Step 3] ETRI Optimus - Model Evaluation")
+        print(f"  Node: {os.environ.get('NODE_NAME', 'unknown')}")
+        print("=" * 60)
+
+        metrics = {
+            'accuracy': random.uniform(0.88, 0.95),
+            'f1_score': random.uniform(0.85, 0.93),
+            'perplexity': random.uniform(5.0, 15.0),
+        }
+        for name, value in metrics.items():
+            print(f"  {name}: {value:.4f}")
+            time.sleep(3)
+
+        print(f"\n  Model {'PASSED' if metrics['accuracy'] > 0.85 else 'FAILED'}")
+        print("[Step 3] Evaluation DONE!")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data
+        readOnly: true
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      - name: CONTAINER_NAME
+        value: "main"
+      - name: APOLLO_ENDPOINT
+        value: "apollo-policy-server.keti.svc.cluster.local:50051"
+      - name: METRICS_INTERVAL_SECONDS
+        value: "5"
+      resources:
+        requests:
+          cpu: "20m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
+
+  ###########################################################################
+  # Step 4: 결과 저장/아카이빙 (Argo 컨테이너)
+  #
+  # APOLLO 자동 감지: io-pattern, workload-stage 등
+  ###########################################################################
+  - name: archive-step
+    schedulerName: ai-storage-scheduler                            # [필수] 커스텀 스케줄러
+    tolerations:
+    - operator: Exists
+    container:
+      name: main
+      image: python:3.11-slim
+      command: [python3, -c]
+      args:
+      - |
+        import time, os
+        print("=" * 60)
+        print("[Step 4] Archive - Save Model & Results")
+        print(f"  Node: {os.environ.get('NODE_NAME', 'unknown')}")
+        print("=" * 60)
+
+        for item in ['model_weights', 'training_logs', 'evaluation_metrics']:
+            print(f"  Archiving: {item}...")
+            time.sleep(3)
+
+        print("=" * 60)
+        print("OPTIMUS PIPELINE COMPLETED!")
+        print("=" * 60)
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "200m"
+          memory: "256Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data
+      - name: model-output
+        mountPath: /output
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      - name: CONTAINER_NAME
+        value: "main"
+      - name: APOLLO_ENDPOINT
+        value: "apollo-policy-server.keti.svc.cluster.local:50051"
+      - name: METRICS_INTERVAL_SECONDS
+        value: "5"
+      resources:
+        requests:
+          cpu: "20m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"

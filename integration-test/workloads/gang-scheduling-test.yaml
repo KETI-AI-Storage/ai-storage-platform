@@ -1,0 +1,274 @@
+# =============================================================================
+# Kueue Gang Scheduling Test
+# =============================================================================
+# Gang Scheduling: 여러 Pod가 동시에 스케줄되거나, 모두 대기해야 하는 패턴
+# 분산 학습에서 Master + Worker들이 함께 떠야할 때 사용
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gang-test-config
+  namespace: ai-workload-test
+data:
+  total-members: "4"
+  job-type: "distributed-training"
+---
+# Master Job (1개)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-master
+  namespace: ai-workload-test
+  labels:
+    # Kueue 연동 - 같은 큐에 넣어서 Gang으로 관리
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    gang-group: distributed-training
+    role: master
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        gang-group: distributed-training
+        role: master
+      annotations:
+        ai-storage.keti/workload-type: "distributed-training"
+        ai-storage.keti/role: "master"
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: master
+        image: python:3.11-slim
+        command: ["python3", "-c"]
+        args:
+        - |
+          import os
+          import time
+          import socket
+
+          print("=" * 60)
+          print("GANG SCHEDULING TEST - MASTER NODE")
+          print("=" * 60)
+          print(f"Hostname: {socket.gethostname()}")
+          print(f"Node: {os.environ.get('NODE_NAME', 'unknown')}")
+          print(f"Pod IP: {os.environ.get('POD_IP', 'unknown')}")
+          print("=" * 60)
+
+          print("\n[Master] Waiting for workers to connect...")
+          print("[Master] Simulating coordination for 30 seconds...")
+
+          for i in range(6):
+              print(f"[Master] Epoch {i+1}/6 - Coordinating workers...")
+              time.sleep(5)
+
+          print("\n[Master] Training coordination completed!")
+          print("=" * 60)
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+  backoffLimit: 2
+---
+# Worker Job 1
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-worker-1
+  namespace: ai-workload-test
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    gang-group: distributed-training
+    role: worker
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        gang-group: distributed-training
+        role: worker
+      annotations:
+        ai-storage.keti/workload-type: "distributed-training"
+        ai-storage.keti/role: "worker"
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: python:3.11-slim
+        command: ["python3", "-c"]
+        args:
+        - |
+          import os
+          import time
+          import socket
+
+          print("=" * 60)
+          print("GANG SCHEDULING TEST - WORKER 1")
+          print("=" * 60)
+          print(f"Hostname: {socket.gethostname()}")
+          print(f"Node: {os.environ.get('NODE_NAME', 'unknown')}")
+          print("=" * 60)
+
+          print("\n[Worker-1] Connected to master, starting training...")
+
+          for i in range(6):
+              print(f"[Worker-1] Epoch {i+1}/6 - Training batch...")
+              time.sleep(5)
+
+          print("\n[Worker-1] Training completed!")
+          print("=" * 60)
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+  backoffLimit: 2
+---
+# Worker Job 2
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-worker-2
+  namespace: ai-workload-test
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    gang-group: distributed-training
+    role: worker
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        gang-group: distributed-training
+        role: worker
+      annotations:
+        ai-storage.keti/workload-type: "distributed-training"
+        ai-storage.keti/role: "worker"
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: python:3.11-slim
+        command: ["python3", "-c"]
+        args:
+        - |
+          import os
+          import time
+          import socket
+
+          print("=" * 60)
+          print("GANG SCHEDULING TEST - WORKER 2")
+          print("=" * 60)
+          print(f"Hostname: {socket.gethostname()}")
+          print(f"Node: {os.environ.get('NODE_NAME', 'unknown')}")
+          print("=" * 60)
+
+          print("\n[Worker-2] Connected to master, starting training...")
+
+          for i in range(6):
+              print(f"[Worker-2] Epoch {i+1}/6 - Training batch...")
+              time.sleep(5)
+
+          print("\n[Worker-2] Training completed!")
+          print("=" * 60)
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+  backoffLimit: 2
+---
+# Worker Job 3
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-worker-3
+  namespace: ai-workload-test
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    gang-group: distributed-training
+    role: worker
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        gang-group: distributed-training
+        role: worker
+      annotations:
+        ai-storage.keti/workload-type: "distributed-training"
+        ai-storage.keti/role: "worker"
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: python:3.11-slim
+        command: ["python3", "-c"]
+        args:
+        - |
+          import os
+          import time
+          import socket
+
+          print("=" * 60)
+          print("GANG SCHEDULING TEST - WORKER 3")
+          print("=" * 60)
+          print(f"Hostname: {socket.gethostname()}")
+          print(f"Node: {os.environ.get('NODE_NAME', 'unknown')}")
+          print("=" * 60)
+
+          print("\n[Worker-3] Connected to master, starting training...")
+
+          for i in range(6):
+              print(f"[Worker-3] Epoch {i+1}/6 - Training batch...")
+              time.sleep(5)
+
+          print("\n[Worker-3] Training completed!")
+          print("=" * 60)
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+  backoffLimit: 2

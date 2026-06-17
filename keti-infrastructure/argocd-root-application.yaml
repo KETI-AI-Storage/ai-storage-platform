@@ -1,0 +1,140 @@
+###############################################################################
+# Argo CD Root Application for KETI AI Storage Platform
+# App-of-Apps Pattern: Manages all sub-applications
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-ai-storage-platform
+  namespace: argocd
+  labels:
+    project: keti-ai-storage
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/keti-platform.git
+    targetRevision: main
+    path: keti-infrastructure/argocd-apps
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+---
+###############################################################################
+# Individual Component Applications (App-of-Apps children)
+###############################################################################
+
+# 1. APOLLO - PPO-based Scheduling Policy Engine
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-apollo
+  namespace: argocd
+  labels:
+    project: keti-ai-storage
+    component: apollo
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/keti-platform.git
+    targetRevision: main
+    path: apollo/deployments
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keti
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+# 2. AI Storage Scheduler
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-scheduler
+  namespace: argocd
+  labels:
+    project: keti-ai-storage
+    component: scheduler
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/keti-platform.git
+    targetRevision: main
+    path: ai-storage-scheduler/deployments
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keti
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+# 3. Insight-Scope (Cluster Metrics DaemonSet)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-insight-scope
+  namespace: argocd
+  labels:
+    project: keti-ai-storage
+    component: insight-scope
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/keti-platform.git
+    targetRevision: main
+    path: insight-scope/deployments
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keti
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+# 4. Insight-Trace (Sidecar Injector)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-insight-trace
+  namespace: argocd
+  labels:
+    project: keti-ai-storage
+    component: insight-trace
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/keti-platform.git
+    targetRevision: main
+    path: insight-trace/deployments
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keti
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

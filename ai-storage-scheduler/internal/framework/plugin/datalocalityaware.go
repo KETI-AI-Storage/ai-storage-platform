@@ -1,0 +1,476 @@
+// ============================================
+// DataLocalityAware Plugin
+// 데이터 노드 우선 배치, 네트워크 전송 최소화
+// ============================================
+//
+// 이 플러그인은 APOLLO로부터 워크로드 분석 결과를 받아
+// 전처리 워크로드의 입력 데이터가 위치한 노드에
+// 우선적으로 스케줄링하여 네트워크 전송을 최소화합니다.
+//
+// APOLLO 연동:
+// - insight-trace가 분석한 데이터 로컬리티 정보 활용
+// - 노드별 데이터 캐싱 상태 확인
+// - APOLLO의 NodePreferences 점수 반영
+//
+// 점수 산정 기준:
+// 1. APOLLO NodePreference 점수 (0-30점) - APOLLO 분석 결과
+// 2. PVC가 바인딩된 노드 (로컬 스토리지) - 최우선 (0-30점)
+// 3. 데이터셋이 캐싱된 노드 - 우선 (0-20점)
+// 4. 네트워크 토폴로지 상 가까운 노드 - 일반 (0-20점)
+// ============================================
+
+package plugin
+
+import (
+	"context"
+	"strings"
+
+	"keti/ai-storage-scheduler/internal/apollo"
+	logger "keti/ai-storage-scheduler/internal/backend/log"
+	"keti/ai-storage-scheduler/internal/configmanager"
+	framework "keti/ai-storage-scheduler/internal/framework"
+	"keti/ai-storage-scheduler/internal/framework/plugin/cachelocality"
+	utils "keti/ai-storage-scheduler/internal/framework/utils"
+
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+)
+
+const DataLocalityAwareName = "DataLocalityAware"
+
+// DataLocalityAware scores nodes based on data locality for preprocessing workloads
+type DataLocalityAware struct {
+	cache        *utils.Cache
+	kubeClient   kubernetes.Interface
+	apolloClient *apollo.Client
+}
+
+var _ framework.ScorePlugin = &DataLocalityAware{}
+var _ framework.FilterPlugin = &DataLocalityAware{}
+
+// NewDataLocalityAware creates a new DataLocalityAware plugin
+func NewDataLocalityAware(cache *utils.Cache, kubeClient kubernetes.Interface) *DataLocalityAware {
+	return &DataLocalityAware{
+		cache:        cache,
+		kubeClient:   kubeClient,
+		apolloClient: apollo.GetClient(),
+	}
+}
+
+func (d *DataLocalityAware) Name() string {
+	return DataLocalityAwareName
+}
+
+// Filter filters out nodes that cannot satisfy data locality requirements
+func (d *DataLocalityAware) Filter(ctx context.Context, pod *v1.Pod, nodeInfo *utils.NodeInfo) *utils.Status {
+	node := nodeInfo.Node()
+	if node == nil {
+		return utils.NewStatus(utils.Error, "node not found")
+	}
+
+	// Get scheduling policy from APOLLO
+	policy := d.getSchedulingPolicy(pod)
+
+	// 샤드 인덱스·STS·PVC 토폴로지 기반 배치는 ShardAware가 담당한다(전처리가 아닌 경우).
+	// 전처리 워크로드만 여기서 PVC 접근 필터를 적용한다.
+
+	// 전처리 워크로드가 아니면 필터링 안함
+	if !apollo.IsPreprocessingWorkload(policy) && !d.isPreprocessingWorkloadFromPod(pod) {
+		return utils.NewStatus(utils.Success, "")
+	}
+
+	// ReadWriteOnce PVC가 있고 이미 다른 노드에 바인딩된 경우 필터링
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil {
+			pvcName := volume.PersistentVolumeClaim.ClaimName
+			if !d.canAccessPVC(pod.Namespace, pvcName, node.Name) {
+				return utils.NewStatus(utils.Unschedulable,
+					"PVC %s is not accessible from node %s", pvcName, node.Name)
+			}
+		}
+	}
+
+	return utils.NewStatus(utils.Success, "")
+}
+
+// Score scores nodes based on data locality
+func (d *DataLocalityAware) Score(ctx context.Context, pod *v1.Pod, nodeName string) (int64, *utils.Status) {
+	nodeInfo := d.cache.Nodes()[nodeName]
+	if nodeInfo == nil {
+		return 0, utils.NewStatus(utils.Error, "node not found in cache")
+	}
+
+	node := nodeInfo.Node()
+	if node == nil {
+		return 0, utils.NewStatus(utils.Error, "node not found")
+	}
+
+	// Get scheduling policy from APOLLO with source tracking
+	policy, dataSource := d.getSchedulingPolicyWithSource(pod)
+
+	// 전처리 워크로드 여부 판단 및 데이터 소스 로깅
+	isPreprocessFromAPOLLO := apollo.IsPreprocessingWorkload(policy)
+	isPreprocessFromPod := d.isPreprocessingWorkloadFromPod(pod)
+
+	if !isPreprocessFromAPOLLO && !isPreprocessFromPod {
+		return 50, utils.NewStatus(utils.Success, "")
+	}
+
+	// 데이터 소스 로깅 - 전처리 워크로드 판단 근거
+	if isPreprocessFromAPOLLO {
+		logger.Info("[DataLocalityAware-DataSource] Preprocessing detected from APOLLO",
+			"namespace", pod.Namespace, "pod", pod.Name, "source", dataSource)
+	} else if isPreprocessFromPod {
+		logger.Info("[DataLocalityAware-DataSource] Preprocessing detected from Pod labels/annotations (FALLBACK)",
+			"namespace", pod.Namespace, "pod", pod.Name,
+			"pipeline-step", pod.Labels["pipeline-step"],
+			"stage", pod.Labels["stage"],
+			"workload-stage", pod.Annotations["ai-storage.keti/workload-stage"])
+	}
+
+	score := int64(0)
+
+	// 1. APOLLO NodePreference 점수 (0-30점)
+	// APOLLO가 분석한 데이터 로컬리티 기반 노드 선호도
+	apolloScore, apolloScoreSource := d.calculateAPOLLOScoreWithSource(policy, nodeName, dataSource)
+	score += apolloScore
+
+	// 2. PVC 로컬리티 점수 (0-30점) - 항상 K8s API에서 가져옴
+	pvcScore := d.calculatePVCLocalityScore(pod, node)
+	score += pvcScore
+
+	// 3. 데이터셋 캐시 점수 (0-20점) — 로컬 캐시 디렉터리 실측(파일 적중·용량)
+	cacheScore, cacheScoreSource := d.calculateFilesystemCacheScore(pod, node)
+	score += cacheScore
+
+	// 4. 네트워크 토폴로지 점수 (0-20점) - Pod annotations에서 가져옴
+	topologyScore := d.calculateTopologyScore(pod, node)
+	score += topologyScore
+
+	logger.Info("[DataLocalityAware] Node scored",
+		"node", nodeName, "score", score,
+		"apolloScore", apolloScore, "apolloScoreSource", apolloScoreSource,
+		"pvcScore", pvcScore, "pvcScoreSource", "K8s-API",
+		"cacheScore", cacheScore, "cacheScoreSource", cacheScoreSource,
+		"topologyScore", topologyScore, "topologyScoreSource", "Pod-Annotations")
+
+	return score, utils.NewStatus(utils.Success, "")
+}
+
+func (d *DataLocalityAware) ScoreExtensions() framework.ScoreExtensions {
+	return d
+}
+
+func (d *DataLocalityAware) NormalizeScore(ctx context.Context, pod *v1.Pod, scores utils.PluginResult) *utils.Status {
+	return utils.NewStatus(utils.Success, "")
+}
+
+// getSchedulingPolicyWithSource fetches scheduling policy from APOLLO with source tracking
+func (d *DataLocalityAware) getSchedulingPolicyWithSource(pod *v1.Pod) (*apollo.SchedulingPolicy, apollo.DataSource) {
+	if d.apolloClient == nil {
+		logger.Info("[DataLocalityAware-DataSource] FALLBACK - No APOLLO client, using Pod labels/annotations",
+			"namespace", pod.Namespace, "pod", pod.Name)
+		return nil, apollo.DataSourceFallback
+	}
+
+	result := d.apolloClient.GetSchedulingPolicyWithSource(
+		pod.Namespace,
+		pod.Name,
+		string(pod.UID),
+		pod.Labels,
+		pod.Annotations,
+	)
+
+	return result.Policy, result.Source
+}
+
+// getSchedulingPolicy fetches scheduling policy from APOLLO (legacy wrapper)
+func (d *DataLocalityAware) getSchedulingPolicy(pod *v1.Pod) *apollo.SchedulingPolicy {
+	policy, _ := d.getSchedulingPolicyWithSource(pod)
+	return policy
+}
+
+// calculateAPOLLOScoreWithSource calculates score based on APOLLO's node preferences with source tracking
+func (d *DataLocalityAware) calculateAPOLLOScoreWithSource(policy *apollo.SchedulingPolicy, nodeName string, policySource apollo.DataSource) (int64, string) {
+	// Get max score from CRD config (defaults applied by configmanager)
+	cfg := configmanager.GetManager().GetDataLocalityConfig()
+	maxScore := int64(cfg.Scoring.ApolloScoreMax)
+
+	if policy == nil || policySource == apollo.DataSourceFallback {
+		return maxScore / 2, "NEUTRAL (no APOLLO data)" // 중립 점수
+	}
+
+	// APOLLO NodePreference에서 이 노드의 점수 확인
+	prefScore := apollo.GetNodePreferenceScore(policy, nodeName)
+	if prefScore > 0 {
+		// APOLLO 점수를 0-maxScore 범위로 매핑 (APOLLO는 0-100)
+		return int64(prefScore) * maxScore / 100, "APOLLO-NodePreference"
+	}
+
+	// 데이터 위치 노드인지 확인
+	dataLocations := apollo.GetDataLocations(policy)
+	for _, loc := range dataLocations {
+		if loc == nodeName {
+			return maxScore, "APOLLO-DataLocation" // 데이터가 있는 노드는 최고 점수
+		}
+	}
+
+	return maxScore / 3, "APOLLO-Default" // 기본 점수
+}
+
+// calculateAPOLLOScore calculates score based on APOLLO's node preferences (legacy wrapper)
+func (d *DataLocalityAware) calculateAPOLLOScore(policy *apollo.SchedulingPolicy, nodeName string) int64 {
+	score, _ := d.calculateAPOLLOScoreWithSource(policy, nodeName, apollo.DataSourceAPOLLO)
+	return score
+}
+
+// isPreprocessingWorkloadFromPod checks pod labels/annotations directly (fallback)
+func (d *DataLocalityAware) isPreprocessingWorkloadFromPod(pod *v1.Pod) bool {
+	// Check labels
+	if stage, ok := pod.Labels["pipeline-step"]; ok {
+		if stage == "preprocess" || stage == "preprocessing" {
+			return true
+		}
+	}
+
+	if stage, ok := pod.Labels["stage"]; ok {
+		if stage == "preprocess" || stage == "preprocessing" || stage == "data-loading" {
+			return true
+		}
+	}
+
+	// Check workload type annotation
+	if wtype, ok := pod.Annotations["ai-storage.keti/workload-stage"]; ok {
+		if strings.Contains(strings.ToLower(wtype), "preprocess") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// calculatePVCLocalityScore calculates score based on PVC locality
+func (d *DataLocalityAware) calculatePVCLocalityScore(pod *v1.Pod, node *v1.Node) int64 {
+	// Get max score from CRD config (defaults applied by configmanager)
+	cfg := configmanager.GetManager().GetDataLocalityConfig()
+	maxScore := int64(cfg.Scoring.PVCLocalityScoreMax)
+
+	// 비전처리 샤드 워크로드의 PVC 가산은 ShardAware에 맡기고 여기서는 중립값만 반환한다.
+	if isShardIndexedWorkload(pod) && !d.isPreprocessingWorkloadFromPod(pod) && !apollo.IsPreprocessingWorkload(d.getSchedulingPolicy(pod)) {
+		return maxScore / 2
+	}
+
+	if len(pod.Spec.Volumes) == 0 {
+		return maxScore / 2 // No volumes, neutral score
+	}
+
+	totalScore := int64(0)
+	pvcCount := 0
+
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+		pvcCount++
+
+		pvcName := volume.PersistentVolumeClaim.ClaimName
+
+		// Check if PVC has node affinity to this node
+		if d.isPVCLocalToNode(pod.Namespace, pvcName, node.Name) {
+			totalScore += maxScore // Maximum locality score
+		} else if d.isPVCAccessibleFromNode(pod.Namespace, pvcName, node.Name) {
+			totalScore += maxScore / 2 // Accessible but not local
+		}
+	}
+
+	if pvcCount == 0 {
+		return maxScore / 2
+	}
+
+	return totalScore / int64(pvcCount)
+}
+
+// isPVCLocalToNode checks if PVC is local to the specified node
+func (d *DataLocalityAware) isPVCLocalToNode(namespace, pvcName, nodeName string) bool {
+	if d.kubeClient == nil {
+		return false
+	}
+
+	ctx := context.Background()
+
+	// Get PVC
+	pvc, err := d.kubeClient.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+
+	// If PVC is not bound, no locality
+	if pvc.Status.Phase != v1.ClaimBound || pvc.Spec.VolumeName == "" {
+		return false
+	}
+
+	// Get PV
+	pv, err := d.kubeClient.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+
+	// Check PV node affinity
+	if pv.Spec.NodeAffinity != nil && pv.Spec.NodeAffinity.Required != nil {
+		for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+			for _, expr := range term.MatchExpressions {
+				if expr.Key == "kubernetes.io/hostname" {
+					for _, value := range expr.Values {
+						if value == nodeName {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check local PV path (if it's a local PV)
+	if pv.Spec.Local != nil {
+		if pv.Spec.NodeAffinity != nil {
+			return true // Already checked above
+		}
+	}
+
+	return false
+}
+
+// isPVCAccessibleFromNode checks if PVC is accessible from the node
+func (d *DataLocalityAware) isPVCAccessibleFromNode(namespace, pvcName, nodeName string) bool {
+	if d.kubeClient == nil {
+		return true // Assume accessible if can't check
+	}
+
+	ctx := context.Background()
+
+	pvc, err := d.kubeClient.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		return true
+	}
+
+	// ReadWriteMany can be accessed from any node
+	for _, accessMode := range pvc.Spec.AccessModes {
+		if accessMode == v1.ReadWriteMany || accessMode == v1.ReadOnlyMany {
+			return true
+		}
+	}
+
+	// ReadWriteOnce - check if bound PV is accessible
+	if pvc.Status.Phase == v1.ClaimBound {
+		return d.isPVCLocalToNode(namespace, pvcName, nodeName)
+	}
+
+	return true // Unbound PVC can be bound anywhere
+}
+
+// canAccessPVC checks if a node can access the PVC
+func (d *DataLocalityAware) canAccessPVC(namespace, pvcName, nodeName string) bool {
+	if d.kubeClient == nil {
+		return true
+	}
+
+	ctx := context.Background()
+
+	pvc, err := d.kubeClient.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		return true
+	}
+
+	// ReadWriteMany/ReadOnlyMany can be accessed from any node
+	for _, accessMode := range pvc.Spec.AccessModes {
+		if accessMode == v1.ReadWriteMany || accessMode == v1.ReadOnlyMany {
+			return true
+		}
+	}
+
+	// ReadWriteOnce - if bound, check node affinity
+	if pvc.Status.Phase == v1.ClaimBound {
+		return d.isPVCLocalToNode(namespace, pvcName, nodeName)
+	}
+
+	return true // Unbound - can be bound to this node
+}
+
+// calculateFilesystemCacheScore는 /tmp/ai-storage-cache(또는 KETI_NODE_CACHE_VIEW_ROOT)에서
+// 실제 파일 존재·디스크 여유를 반영해 점수를 산출한다(APOLLO·노드 annotation 가짜 지표 미사용).
+func (d *DataLocalityAware) calculateFilesystemCacheScore(pod *v1.Pod, node *v1.Node) (int64, string) {
+	cfg := configmanager.GetManager().GetDataLocalityConfig()
+	maxScore := int64(cfg.Scoring.CacheScoreMax)
+	in := cachelocality.DefaultScoreInput(maxScore)
+	res := cachelocality.ScoreForPod(pod, node.Name, in)
+	if res.Warn != nil {
+		logger.Warn("[DataLocalityAware-CacheFS] 캐시 경로를 읽지 못해 중립 점수 적용",
+			"node", node.Name,
+			"error", res.Warn.Error(),
+			"score", res.Score,
+			"detail", res.Source)
+	}
+	return res.Score, res.Source
+}
+
+// calculateTopologyScore scores based on network topology proximity
+func (d *DataLocalityAware) calculateTopologyScore(pod *v1.Pod, node *v1.Node) int64 {
+	// Get max score from CRD config (defaults applied by configmanager)
+	cfg := configmanager.GetManager().GetDataLocalityConfig()
+	maxScore := int64(cfg.Scoring.TopologyScoreMax)
+
+	labels := node.Labels
+	if labels == nil {
+		return maxScore / 2
+	}
+
+	score := maxScore / 2
+
+	// Check topology zone - prefer same zone as data source
+	if zone, ok := labels["topology.kubernetes.io/zone"]; ok {
+		dataZone := d.getPreferredZone(pod)
+		if dataZone != "" && zone == dataZone {
+			score = maxScore
+		}
+	}
+
+	// Check rack topology for data center aware scheduling
+	if rack, ok := labels["topology.kubernetes.io/rack"]; ok {
+		dataRack := d.getPreferredRack(pod)
+		if dataRack != "" && rack == dataRack {
+			score = maxScore
+		}
+	}
+
+	return score
+}
+
+// getPreferredZone extracts preferred zone from pod spec or annotations
+func (d *DataLocalityAware) getPreferredZone(pod *v1.Pod) string {
+	if zone, ok := pod.Annotations["ai-storage.keti/preferred-zone"]; ok {
+		return zone
+	}
+
+	// Check affinity for zone preference
+	if pod.Spec.Affinity != nil && pod.Spec.Affinity.NodeAffinity != nil {
+		pref := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+		for _, term := range pref {
+			for _, expr := range term.Preference.MatchExpressions {
+				if expr.Key == "topology.kubernetes.io/zone" && len(expr.Values) > 0 {
+					return expr.Values[0]
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// getPreferredRack extracts preferred rack from pod annotations
+func (d *DataLocalityAware) getPreferredRack(pod *v1.Pod) string {
+	if rack, ok := pod.Annotations["ai-storage.keti/preferred-rack"]; ok {
+		return rack
+	}
+	return ""
+}

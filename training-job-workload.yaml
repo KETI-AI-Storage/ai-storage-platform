@@ -1,0 +1,77 @@
+---
+# 샘플 학습(Job) 워크로드. 웹훅이 PVC에 StorageClass·KETI 메타데이터를 주입하는지 확인용.
+#
+# PVC에 넣는 라벨은 ai-storage-webhook/pkg/webhook/mutate.go 의 selectStorageClass() /
+# extract*FromPVC() 와 동일한 키를 사용 (스코어링·티어 추정에 반영됨).
+#
+# - stage / gpuCount: 학습 단계·GPU 수
+# - workload.keti.io/framework: pytorch (스코어 시 learning 계열)
+# - workload.keti.io/mount-path: 마운트 경로(라벨 값은 '/' 불가 → annotation 권장)
+# - workload.keti.io/kind: job (Batch Job → Job 점수)
+# - workload.keti.io/pvc-count: 이 워크로드가 쓰는 PVC 개수 (여기서는 1)
+# - workload.keti.io/replica-count: 동시에 뜨는 Pod 수에 대한 힌트 (Job parallelism 1 → 1)
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-admission-webhook
+  labels:
+    keti-ai-storage-injection: enabled
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: training-job-data
+  namespace: k8s-admission-webhook
+  annotations:
+    workload.keti.io/mount-path: "/data"
+  labels:
+    stage: train
+    gpuCount: "1"
+    workload.keti.io/stage: train
+    workload.keti.io/type: training
+    workload.keti.io/framework: pytorch
+    workload.keti.io/kind: job
+    workload.keti.io/pvc-count: "1"
+    workload.keti.io/replica-count: "1"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: 생략(웹훅이 주입)
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: training-job-workload
+  namespace: k8s-admission-webhook
+spec:
+  parallelism: 1
+  completions: 1
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: training-job-workload
+        stage: train
+        workload.keti.io/stage: train
+        workload.keti.io/type: training
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: workload
+          image: busybox:1.36
+          command: ["sh", "-c", "echo training-workload-start; ls -la /data; sleep 3600"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: training-job-data

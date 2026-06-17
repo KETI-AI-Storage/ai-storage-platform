@@ -1,0 +1,76 @@
+# =============================================================================
+# Kueue ClusterQueue - 클러스터 전체 리소스 할당량 정의
+# =============================================================================
+# ClusterQueue는 클러스터에서 사용할 수 있는 리소스 총량을 정의합니다.
+#
+# 제약사항:
+# - 하나의 ResourceFlavor는 하나의 resourceGroup에만 포함 가능
+# - 하나의 coveredResource는 하나의 resourceGroup에만 정의 가능
+# =============================================================================
+
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: ai-storage-cluster-queue
+spec:
+  # ─────────────────────────────────────────────────────────────────────────
+  # namespaceSelector: 이 ClusterQueue를 사용할 수 있는 네임스페이스 지정
+  # ─────────────────────────────────────────────────────────────────────────
+  namespaceSelector: {}  # 모든 네임스페이스 허용
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # queueingStrategy: 대기열 처리 전략
+  # - StrictFIFO: 엄격한 선입선출 (기본값)
+  # - BestEffortFIFO: 앞의 Job이 막혀도 뒤의 Job 실행 가능
+  # ─────────────────────────────────────────────────────────────────────────
+  queueingStrategy: BestEffortFIFO
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # resourceGroups: 리소스 그룹 정의 (단일 그룹으로 모든 리소스 관리)
+  # ─────────────────────────────────────────────────────────────────────────
+  resourceGroups:
+  - coveredResources: ["cpu", "memory"]
+    flavors:
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Default Flavor - 일반 워커 노드
+    # 노드: ai-storage-worker-01
+    # 용도: 일반 워크로드
+    # ─────────────────────────────────────────────────────────────────────
+    - name: default-flavor
+      resources:
+      - name: cpu
+        nominalQuota: 16        # 최대 16 CPU 코어
+      - name: memory
+        nominalQuota: 32Gi      # 최대 32GB 메모리
+
+    # ─────────────────────────────────────────────────────────────────────
+    # CSD Flavor - Computational Storage Device 노드
+    # 노드: csd-server-01 (csd.enabled=true)
+    # 용도: 스토리지 집약적 워크로드, 데이터 전처리
+    # ─────────────────────────────────────────────────────────────────────
+    - name: csd-flavor
+      resources:
+      - name: cpu
+        nominalQuota: 8         # 최대 8 CPU 코어
+      - name: memory
+        nominalQuota: 64Gi      # 최대 64GB 메모리
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GPU Flavor - GPU 탑재 노드
+    # 노드: gpu-server-03 (nvidia.com/gpu=present)
+    # 용도: AI/ML 학습, 추론
+    # ─────────────────────────────────────────────────────────────────────
+    - name: gpu-flavor
+      resources:
+      - name: cpu
+        nominalQuota: 32        # 최대 32 CPU 코어
+      - name: memory
+        nominalQuota: 64Gi      # 최대 64GB 메모리
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # preemption: 선점 정책
+  # ─────────────────────────────────────────────────────────────────────────
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority

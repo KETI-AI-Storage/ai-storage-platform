@@ -1,0 +1,240 @@
+# cifar10-inference-workload.yaml
+# CIFAR-10 checkpoint 기반 GPU 추론 Job 정의.
+#
+# Author: 미정 <unknown@example.com>
+# Created: 2026-05-27
+#
+# storageClassName은 의도적으로 비워 둔다. ai-storage webhook이 PVC annotation을 보고 주입한다.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-storage-workloads
+  labels:
+    keti-ai-storage-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cifar10-workload
+  namespace: ai-storage-workloads
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cifar10-workload-pod-reader
+  namespace: ai-storage-workloads
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cifar10-workload-pod-reader
+  namespace: ai-storage-workloads
+subjects:
+  - kind: ServiceAccount
+    name: cifar10-workload
+    namespace: ai-storage-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cifar10-workload-pod-reader
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-preprocessing-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: preprocessing
+    storage.keti.io/data-role: preprocessing-input
+    storage.keti.io/priority: high
+    storage.keti.io/io-pattern: large-read
+    storage.keti.io/latency: low
+  labels:
+    app: cifar10-inference-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-checkpoint-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: training
+    storage.keti.io/data-role: intermediate
+    storage.keti.io/priority: medium
+    storage.keti.io/io-pattern: large-write
+  labels:
+    app: cifar10-inference-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-result-log-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: archive
+    storage.keti.io/data-role: result-backup
+    storage.keti.io/priority: low
+  labels:
+    app: cifar10-inference-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cifar10-inference-workload
+  namespace: ai-storage-workloads
+  labels:
+    app: cifar10-inference-workload
+    workload.keti.io/type: inference
+    workload.keti.io/framework: pytorch
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: cifar10-inference-workload
+        workload.keti.io/type: inference
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: inference
+    spec:
+      serviceAccountName: cifar10-workload
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpu-server-03
+      containers:
+        - name: inference
+          image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args:
+            - |
+              python3 -u /opt/workloads/cifar10_inference.py
+          env:
+            - name: MAX_TEST_SAMPLES
+              value: "1000"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "2"
+              memory: "6Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: workload-scripts
+              mountPath: /opt/workloads
+            - name: preprocessed
+              mountPath: /data/preprocessed
+            - name: checkpoints
+              mountPath: /data/checkpoints
+            - name: result-log
+              mountPath: /data/results
+            - name: result-log
+              mountPath: /data/logs
+      volumes:
+        - name: workload-scripts
+          configMap:
+            name: cifar10-inference-script
+        - name: preprocessed
+          persistentVolumeClaim:
+            claimName: cifar10-preprocessing-pvc
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: cifar10-checkpoint-pvc
+        - name: result-log
+          persistentVolumeClaim:
+            claimName: cifar10-result-log-pvc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cifar10-inference-script
+  namespace: ai-storage-workloads
+data:
+  cifar10_inference.py: |
+    from __future__ import annotations
+    import json, os, time
+    from pathlib import Path
+    import torch
+    from torch import nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    class SmallCifarCnn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.features = nn.Sequential(
+                nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d((1, 1)),
+            )
+            self.classifier = nn.Linear(128, 10)
+        def forward(self, x):
+            return self.classifier(torch.flatten(self.features(x), 1))
+
+    preprocessed_dir = Path(os.getenv("PREPROCESSED_DIR", "/data/preprocessed"))
+    checkpoint_dir = Path(os.getenv("CHECKPOINT_DIR", "/data/checkpoints"))
+    result_dir = Path(os.getenv("RESULT_DIR", "/data/results"))
+    log_dir = Path(os.getenv("LOG_DIR", "/data/logs"))
+    result_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_dir / "cifar10_model.pt"
+    test_path = preprocessed_dir / "test.pt"
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"학습 checkpoint가 없습니다. 먼저 training workload를 실행하세요: {checkpoint_path}")
+    if not test_path.exists():
+        raise FileNotFoundError(f"전처리 test 결과가 없습니다: {test_path}")
+    started = time.perf_counter()
+    payload = torch.load(test_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    max_samples = int(os.getenv("MAX_TEST_SAMPLES", "1000"))
+    images, labels = payload["images"][:max_samples], payload["labels"][:max_samples]
+    classes = payload.get("classes") or [str(i) for i in range(10)]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SmallCifarCnn().to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    loader = DataLoader(TensorDataset(images, labels), batch_size=int(os.getenv("BATCH_SIZE", "256")), shuffle=False)
+    predictions, correct, seen = [], 0, 0
+    with torch.no_grad():
+        for batch_images, batch_labels in loader:
+            logits = model(batch_images.to(device))
+            probs = torch.softmax(logits, 1).cpu()
+            pred = probs.argmax(1)
+            conf = probs.max(1).values
+            correct += int((pred == batch_labels).sum().item())
+            seen += int(batch_labels.numel())
+            for p, y, c in zip(pred, batch_labels, conf):
+                if len(predictions) < 100:
+                    predictions.append({"predicted_label": classes[int(p)], "actual_label": classes[int(y)], "confidence": round(float(c), 6)})
+    result = {"samples": seen, "accuracy": round(correct / max(seen, 1), 6), "predictions": predictions}
+    summary = {"status": "completed", "device": str(device), "result_path": str(result_dir / "inference_results.json"), "accuracy": result["accuracy"], "elapsed_seconds": round(time.perf_counter() - started, 3)}
+    (result_dir / "inference_results.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    (log_dir / "inference_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps(summary, indent=2), flush=True)

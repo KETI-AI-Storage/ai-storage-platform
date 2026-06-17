@@ -1,0 +1,63 @@
+# GPU 워크로드 시나리오를 PVC 라벨로 표현한 ai-storage-webhook 검증 매니페스트
+#
+# 티어 규칙: stage=train && gpuCount>0 → StorageClass storage-performance
+#
+# - PVC에 storageClassName을 넣지 않음 → 웹훅이 주입
+# - Pod는 PVC 바인딩·스케줄만 확인하면 되므로 busybox로 마운트 검증 (GPU 노드/CDI 불필요)
+#   (실제 GPU 컨테이너가 필요하면 아래 Deployment 컨테이너만 nvidia 이미지로 바꾸면 됨)
+#
+# 사전 조건:
+#   1) keti 네임스페이스에 ai-storage-webhook 최신 이미지(PVC mutation 지원) 배포
+#   2) MutatingWebhookConfiguration ai-storage-webhook 의 rules에 persistentvolumeclaims 포함
+#   3) StorageClass storage-performance (및 nfs provisioner) 존재
+#   4) 이 네임스페이스에 label keti-ai-storage-injection=enabled
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-webhook-test
+  labels:
+    keti-ai-storage-injection: enabled
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gpu-test-data
+  namespace: gpu-webhook-test
+  labels:
+    stage: train
+    gpuCount: "1"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName 생략 → 웹훅이 storage-performance 등으로 주입
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-test-workload
+  namespace: gpu-webhook-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-test
+  template:
+    metadata:
+      labels:
+        app: gpu-test
+    spec:
+      containers:
+        - name: workload
+          image: busybox:1.36
+          command: ["sh", "-c", "echo ok; ls -la /data; sleep 3600"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: gpu-test-data

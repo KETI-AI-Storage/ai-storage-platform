@@ -1,0 +1,26 @@
+# Simple Dockerfile using pre-built binary
+FROM alpine:3.18
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata
+
+# Copy pre-built binary
+COPY bin/insight-scope /app/insight-scope
+
+# Make executable
+RUN chmod +x /app/insight-scope
+
+# Default environment variables
+ENV PORT=9092
+ENV GRPC_PORT=50054
+
+# Expose ports (HTTP REST + gRPC)
+EXPOSE 9092 50054
+
+# Run as non-root user
+RUN adduser -D -u 1000 insight
+USER insight
+
+ENTRYPOINT ["/app/insight-scope"]

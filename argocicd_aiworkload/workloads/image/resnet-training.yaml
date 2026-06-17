@@ -1,0 +1,192 @@
+###############################################################################
+# ResNet Training Workload
+# - Type: IMAGE (Computer Vision)
+# - Framework: PyTorch + TorchVision
+# - Stage: Training
+# - 충분히 오래 실행되어 insight-trace가 IMAGE 타입을 감지
+###############################################################################
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: resnet-training
+  namespace: ai-workload-test
+  labels:
+    app: resnet-training
+    workload-type: image
+    framework: pytorch
+    stage: training
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: resnet-training
+        workload-type: image
+        framework: pytorch
+    spec:
+      schedulerName: ai-storage-scheduler
+
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+      shareProcessNamespace: true
+
+      containers:
+      #=========================================================================
+      # ResNet Training Container
+      #=========================================================================
+      - name: training
+        image: python:3.11-slim
+        command:
+        - python3
+        - -c
+        - |
+          import time
+          import sys
+          import os
+          import random
+
+          # 프로세스 이름 - resnet, vision, image, pytorch, torchvision 키워드
+          sys.argv[0] = 'resnet50_torchvision_image_trainer.py'
+
+          print("=" * 60)
+          print("KETI AI Storage - ResNet50 Training Workload")
+          print("=" * 60)
+          print(f"Framework: PyTorch + TorchVision")
+          print(f"Model: ResNet50")
+          print(f"Dataset: ImageNet (Simulated)")
+          print(f"Task: Image Classification Training")
+          print("=" * 60)
+
+          EPOCHS = 5
+          BATCHES_PER_EPOCH = 100
+          BATCH_SIZE = 32
+          IMAGE_SIZE = 224
+
+          os.makedirs('/data/images', exist_ok=True)
+          os.makedirs('/data/checkpoints', exist_ok=True)
+          os.makedirs('/data/logs', exist_ok=True)
+
+          # 이미지 데이터셋 시뮬레이션 생성
+          print("Preparing image dataset...")
+          for i in range(20):
+              img_path = f'/data/images/batch_{i}.bin'
+              # 이미지 배치: batch_size x 3 x 224 x 224 x 4bytes
+              size = BATCH_SIZE * 3 * IMAGE_SIZE * IMAGE_SIZE * 4
+              with open(img_path, 'wb') as f:
+                  f.write(os.urandom(min(size, 5 * 1024 * 1024)))  # max 5MB
+          print(f"Dataset ready: 20 batches")
+
+          total_steps = 0
+          for epoch in range(EPOCHS):
+              print(f"\n[Epoch {epoch+1}/{EPOCHS}] Training on ImageNet...")
+              epoch_loss = 0
+              epoch_acc = 0
+
+              for batch_idx in range(BATCHES_PER_EPOCH):
+                  total_steps += 1
+
+                  # 이미지 배치 로딩 (Read I/O - 이미지 워크로드 특성)
+                  batch_file = f'/data/images/batch_{batch_idx % 20}.bin'
+                  with open(batch_file, 'rb') as f:
+                      _ = f.read()
+
+                  # 학습 시뮬레이션
+                  loss = 2.0 - (total_steps * 0.003) + random.uniform(-0.1, 0.1)
+                  acc = min(0.95, 0.3 + (total_steps * 0.001) + random.uniform(-0.02, 0.02))
+                  epoch_loss += loss
+                  epoch_acc += acc
+
+                  # 로그 기록
+                  with open('/data/logs/training.log', 'a') as f:
+                      f.write(f"epoch={epoch+1},batch={batch_idx},loss={loss:.4f},acc={acc:.4f}\n")
+
+                  # Gradient 저장 시뮬레이션 (Write I/O)
+                  if batch_idx % 10 == 0:
+                      with open(f'/data/grad_buffer.bin', 'wb') as f:
+                          f.write(os.urandom(2 * 1024 * 1024))  # 2MB
+
+                  if batch_idx % 20 == 0:
+                      print(f"  Batch {batch_idx}/{BATCHES_PER_EPOCH}: loss={loss:.4f}, acc={acc:.2%}")
+
+                  time.sleep(2)  # 2초 간격
+
+              # 체크포인트 저장
+              ckpt_path = f'/data/checkpoints/resnet50_epoch_{epoch+1}.pt'
+              print(f"  Saving checkpoint: {ckpt_path}")
+              with open(ckpt_path, 'wb') as f:
+                  f.write(os.urandom(100 * 1024 * 1024))  # 100MB (ResNet50 weights)
+
+              avg_loss = epoch_loss / BATCHES_PER_EPOCH
+              avg_acc = epoch_acc / BATCHES_PER_EPOCH
+              print(f"[Epoch {epoch+1}] Completed - Loss: {avg_loss:.4f}, Acc: {avg_acc:.2%}")
+
+          print("\n" + "=" * 60)
+          print("Training completed!")
+          print(f"Total steps: {total_steps}")
+          print("Final model saved to /data/checkpoints/")
+          print("=" * 60)
+
+          # 최종 메트릭 대기
+          print("Waiting for final metrics report...")
+          time.sleep(120)
+
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+
+      #=========================================================================
+      # Insight-Trace Sidecar
+      #=========================================================================
+      - name: insight-trace
+        image: ketidevit2/insight-trace:latest
+        imagePullPolicy: Always
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: APOLLO_ENDPOINT
+          value: "apollo-policy-server.keti.svc.cluster.local:50051"
+        - name: METRICS_INTERVAL
+          value: "5s"
+        - name: ANALYSIS_INTERVAL
+          value: "10s"
+        - name: REPORT_INTERVAL
+          value: "30s"
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+          readOnly: true
+
+      volumes:
+      - name: data-volume
+        emptyDir:
+          sizeLimit: 2Gi
+
+      restartPolicy: Never

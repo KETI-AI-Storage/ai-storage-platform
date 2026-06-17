@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package apollo.forecaster.v1;
+
+option go_package = "insight-hub/proto/forecasterbridgepb";
+
+import "google/protobuf/timestamp.proto";
+
+// Compatibility bridge for legacy insight-scope clients that still send
+// SubmitHistoryData to NodeResourceForecasterService.
+service NodeResourceForecasterService {
+  rpc ForecastNodeResources(ForecastNodeRequest) returns (ForecastNodeResponse);
+  rpc ForecastClusterResources(ForecastClusterRequest) returns (ForecastClusterResponse);
+  rpc GetPeakIdlePrediction(PeakIdleRequest) returns (PeakIdleResponse);
+  rpc SubmitHistoryData(SubmitHistoryRequest) returns (SubmitHistoryResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ForecastNodeRequest {
+  string node_name = 1;
+  repeated int32 forecast_horizons_minutes = 2;
+}
+
+message ForecastClusterRequest {
+  repeated int32 forecast_horizons_minutes = 1;
+  bool include_node_breakdown = 2;
+}
+
+message PeakIdleRequest {
+  string node_name = 1;
+  int32 lookahead_hours = 2;
+}
+
+message SubmitHistoryRequest {
+  string node_name = 1;
+  repeated ResourceSnapshot snapshots = 2;
+}
+
+message ResourceSnapshot {
+  google.protobuf.Timestamp timestamp = 1;
+  double cpu_utilization = 2;
+  double memory_utilization = 3;
+  double gpu_utilization = 4;
+  double storage_io_utilization = 5;
+}
+
+message HealthCheckRequest {}
+
+message ForecastNodeResponse {
+  string node_name = 1;
+  repeated ResourceForecast forecasts = 2;
+  double confidence = 3;
+}
+
+message ResourceForecast {
+  int32 horizon_minutes = 1;
+  double predicted_cpu_utilization = 2;
+  double predicted_memory_utilization = 3;
+  double predicted_gpu_utilization = 4;
+  double predicted_storage_io_utilization = 5;
+  double confidence_interval_lower = 6;
+  double confidence_interval_upper = 7;
+}
+
+message ForecastClusterResponse {
+  repeated ResourceForecast cluster_forecasts = 1;
+  map<string, NodeForecastResult> node_forecasts = 2;
+}
+
+message NodeForecastResult {
+  repeated ResourceForecast forecasts = 1;
+  double confidence = 2;
+}
+
+message PeakIdleResponse {
+  repeated PeakIdlePeriod peak_periods = 1;
+  repeated PeakIdlePeriod idle_periods = 2;
+  BatchWindowRecommendation recommended_batch_window = 3;
+}
+
+message PeakIdlePeriod {
+  int32 horizon_minutes = 1;
+  double avg_utilization = 2;
+  double confidence = 3;
+}
+
+message BatchWindowRecommendation {
+  int32 start_offset_minutes = 1;
+  int32 end_offset_minutes = 2;
+  double expected_utilization = 3;
+}
+
+message SubmitHistoryResponse {
+  bool accepted = 1;
+  int32 snapshots_processed = 2;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+  int32 model_ready = 3;
+  int64 total_predictions = 4;
+  google.protobuf.Timestamp last_training_time = 5;
+}

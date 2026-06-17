@@ -1,0 +1,578 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: preprocessing-pipeline-workflow-
+  labels:
+    component: keti-apollo
+    integration.keti.io/component: preprocessing-pipeline
+    integration.keti.io/storage-target: matafs-ready
+    workload.keti.io/type: preprocessing
+spec:
+  entrypoint: preprocessing-pipeline
+  serviceAccountName: default
+
+  volumes:
+  - name: podinfo
+    downwardAPI:
+      items:
+      - path: "labels"
+        fieldRef:
+          fieldPath: metadata.labels
+      - path: "annotations"
+        fieldRef:
+          fieldPath: metadata.annotations
+  - name: workdir
+    emptyDir: {}
+
+  volumeClaimTemplates:
+  - metadata:
+      name: preprocess-capacity-data
+      labels:
+        integration.keti.io/component: preprocessing-pipeline
+        integration.keti.io/storage-role: capacity
+        workload.keti.io/type: batch
+        workload.keti.io/stage: preprocessing
+      annotations:
+        storage-tier: capacity
+        storage.keti.io/tier-hint: capacity
+        storage.keti.io/dataset-size: "100Gi"
+        storage.keti.io/prefetch: "false"
+        storage.keti.io/latency: "relaxed"
+        storage.keti.io/locality: "worker-local-prestage"
+        storage.keti.io/cache-aware: "false"
+        workload.keti.io/mount-path: /mnt/capacity
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: training-performance-data
+      labels:
+        integration.keti.io/component: preprocessing-pipeline
+        integration.keti.io/storage-role: performance
+        workload.keti.io/type: training
+        workload.keti.io/stage: training
+        workload.keti.io/framework: pytorch
+      annotations:
+        storage-tier: performance
+        storage.keti.io/tier-hint: performance
+        storage.keti.io/dataset-size: "20Gi"
+        storage.keti.io/prefetch: "true"
+        storage.keti.io/latency: "low"
+        storage.keti.io/locality: "same-node-preferred"
+        storage.keti.io/cache-aware: "true"
+        workload.keti.io/mount-path: /mnt/performance
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: metadata-randomio-data
+      labels:
+        integration.keti.io/component: preprocessing-pipeline
+        integration.keti.io/storage-role: metadata-randomio
+        workload.keti.io/type: metadata
+        workload.keti.io/stage: preprocessing
+      annotations:
+        storage-tier: performance
+        storage.keti.io/tier-hint: performance
+        storage.keti.io/dataset-size: "1Gi"
+        storage.keti.io/prefetch: "true"
+        storage.keti.io/latency: "ultra-low"
+        storage.keti.io/locality: "worker-local-index"
+        storage.keti.io/cache-aware: "true"
+        workload.keti.io/mount-path: /mnt/metadata
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+
+  templates:
+  - name: preprocessing-pipeline
+    dag:
+      tasks:
+      - name: preprocess
+        template: preprocess-step
+      - name: train-image-model
+        template: train-step
+        dependencies: [preprocess]
+        arguments:
+          parameters:
+          - name: model-type
+            value: "resnet50"
+          - name: dataset
+            value: "imagenet"
+          artifacts:
+          - name: preprocess-artifact
+            from: "{{tasks.preprocess.outputs.artifacts.preprocess-artifact}}"
+      - name: evaluate
+        template: evaluate-step
+        dependencies: [train-image-model]
+        arguments:
+          artifacts:
+          - name: trained-preprocess-artifact
+            from: "{{tasks.train-image-model.outputs.artifacts.trained-preprocess-artifact}}"
+
+  - name: preprocess-step
+    metadata:
+      labels:
+        pipeline-stage: preprocessing
+        integration.keti.io/stage: preprocessing
+        workload.keti.io/type: preprocessing
+      annotations:
+        mlops.keti.io/main-container: main
+        storage.keti.io/dataset-size: "100Gi"
+        storage.keti.io/prefetch: "true"
+        storage.keti.io/latency: "low"
+        storage.keti.io/locality: "worker-local-prestage"
+        storage.keti.io/cache-aware: "true"
+    outputs:
+      artifacts:
+      - name: preprocess-artifact
+        path: /work/preprocess
+    container:
+      image: python:3.11-slim
+      command: ["python3", "-c"]
+      args:
+      - |
+        import json
+        import os
+        import tarfile
+        from datetime import datetime, timezone
+
+        base_dir = os.environ.get("PREPROCESS_BASE_DIR", "/work/preprocess")
+        workflow_name = os.environ.get("WORKFLOW_NAME", "unknown-workflow")
+        pod_name = os.environ.get("POD_NAME", "unknown-pod")
+        dataset_id = f"{workflow_name}-integration-dataset"
+        created_at = datetime.now(timezone.utc).isoformat()
+        matafs_base = f"/matafs/preprocess/{workflow_name}"
+
+        paths = {
+            "raw": os.path.join(base_dir, "input/raw"),
+            "chunks": os.path.join(base_dir, "input/chunks"),
+            "shards": os.path.join(base_dir, "input/shards"),
+            "index": os.path.join(base_dir, "index"),
+            "output": os.path.join(base_dir, "output"),
+        }
+        stages = ["decode", "filter", "transform", "package"]
+        for path in paths.values():
+            os.makedirs(path, exist_ok=True)
+        for stage in stages:
+            os.makedirs(os.path.join(base_dir, "stages", stage), exist_ok=True)
+
+        samples_path = os.path.join(paths["raw"], "samples.jsonl")
+        with open(samples_path, "w") as raw:
+            for i in range(1, 101):
+                raw.write(json.dumps({
+                    "id": i,
+                    "source": "integration-sample",
+                    "feature_a": round((i % 17) / 17, 6),
+                    "feature_b": round((i % 31) / 31, 6),
+                    "label": i % 10
+                }) + "\n")
+        print("[preprocess] raw data written", flush=True)
+
+        chunk_defs = [
+            ("chunk-0001.jsonl", range(1, 51)),
+            ("chunk-0002.jsonl", range(51, 101)),
+        ]
+        chunks = []
+        for chunk_name, ids in chunk_defs:
+            chunk_path = os.path.join(paths["chunks"], chunk_name)
+            with open(chunk_path, "w") as out:
+                for i in ids:
+                    out.write(json.dumps({
+                        "id": i,
+                        "normalized": round(((i % 17) / 17) ** 2 + ((i % 31) / 31) ** 2, 6),
+                        "label": i % 10
+                    }) + "\n")
+            chunks.append({
+                "name": chunk_name,
+                "path": chunk_path,
+                "future_matafs_path": f"{matafs_base}/input/chunks/{chunk_name}",
+                "record_count": 50
+            })
+        print("[preprocess] chunks written", flush=True)
+
+        shard_defs = [
+            ("shard-0001.tar", "chunk-0001.jsonl", "worker-a"),
+            ("shard-0002.tar", "chunk-0002.jsonl", "worker-b"),
+        ]
+        shards = []
+        for shard_name, chunk_name, target_worker in shard_defs:
+            shard_path = os.path.join(paths["shards"], shard_name)
+            chunk_path = os.path.join(paths["chunks"], chunk_name)
+            with tarfile.open(shard_path, "w") as shard:
+                shard.add(chunk_path, arcname=chunk_name)
+            shards.append({
+                "name": shard_name,
+                "path": shard_path,
+                "chunks": [chunk_name],
+                "target_worker": target_worker,
+                "future_matafs_path": f"{matafs_base}/input/shards/{shard_name}"
+            })
+        print("[preprocess] shards written", flush=True)
+
+        stage_paths = {}
+        for stage in stages:
+            stage_dir = os.path.join(base_dir, "stages", stage)
+            success_path = os.path.join(stage_dir, "_SUCCESS")
+            summary_path = os.path.join(stage_dir, "stage-summary.json")
+            with open(success_path, "w") as success:
+                success.write(created_at + "\n")
+            summary = {
+                "stage": stage,
+                "status": "completed",
+                "path": stage_dir,
+                "success_path": success_path,
+                "summary_path": summary_path,
+                "future_matafs_path": f"{matafs_base}/stages/{stage}",
+                "created_at": created_at
+            }
+            with open(summary_path, "w") as sf:
+                sf.write(json.dumps(summary, indent=2))
+            stage_paths[stage] = summary
+        print("[preprocess] stage paths initialized", flush=True)
+
+        metadata_index = {
+            "dataset_id": dataset_id,
+            "workflow_name": workflow_name,
+            "pod_name": pod_name,
+            "created_at": created_at,
+            "format": "tar_shard",
+            "chunk_count": len(chunks),
+            "shard_count": len(shards),
+            "chunks": chunks,
+            "shards": shards,
+            "shard_chunk_mapping": {shard["name"]: shard["chunks"] for shard in shards},
+            "stage_paths": stage_paths,
+            "hints": {
+                "data_locality": "prefer worker with pre-staged shard",
+                "prefetch": "pre-stage next shard before train consumes current shard",
+                "pre_staging": "copy tar shards to worker-local cache before training",
+                "cache_aware": "reuse shard cache when dataset_id and shard name match"
+            },
+            "matafs_future_path": f"{matafs_base}/"
+        }
+        metadata_path = os.path.join(paths["index"], "metadata-index.json")
+        with open(metadata_path, "w") as mf:
+            mf.write(json.dumps(metadata_index, indent=2))
+        print("[preprocess] metadata-index written", flush=True)
+
+        manifest = {
+            "dataset_id": dataset_id,
+            "workflow_name": workflow_name,
+            "base_dir": base_dir,
+            "metadata_index_path": metadata_path,
+            "format": "tar_shard",
+            "chunk_count": len(chunks),
+            "shard_count": len(shards),
+            "chunks": chunks,
+            "shards": shards,
+            "created_at": created_at
+        }
+        manifest_path = os.path.join(base_dir, "manifest.json")
+        with open(manifest_path, "w") as mf:
+            mf.write(json.dumps(manifest, indent=2))
+        print("[preprocess] manifest written", flush=True)
+
+        placement_plan = {
+            "target_storage": "MataFS",
+            "placement_mode": "worker-local-prestage",
+            "created_at": created_at,
+            "shards": [
+                {
+                    "shard": shard["name"],
+                    "source_path": shard["path"],
+                    "target_worker": shard["target_worker"],
+                    "future_target_path": shard["future_matafs_path"],
+                    "gluesys_path_api": {
+                        "status": "planned",
+                        "method": "POST",
+                        "endpoint": "/api/v1/matafs/placement/path",
+                        "request_field": "future_target_path"
+                    }
+                }
+                for shard in shards
+            ]
+        }
+        placement_path = os.path.join(paths["output"], "placement-plan.json")
+        with open(placement_path, "w") as pf:
+            pf.write(json.dumps(placement_plan, indent=2))
+        print("[preprocess] placement-plan written", flush=True)
+
+        cleanup_plan = {
+            "created_at": created_at,
+            "stage_temp_paths": {
+                "decode": os.path.join(base_dir, "stages/decode/tmp"),
+                "filter": os.path.join(base_dir, "stages/filter/tmp"),
+                "transform": os.path.join(base_dir, "stages/transform/tmp"),
+                "package": os.path.join(base_dir, "stages/package/tmp")
+            },
+            "delete_after": {
+                "decode": "after filter _SUCCESS",
+                "filter": "after transform _SUCCESS",
+                "transform": "after package _SUCCESS",
+                "package": "after manifest and placement-plan are persisted"
+            },
+            "preserve_outputs": [
+                samples_path,
+                manifest_path,
+                metadata_path,
+                placement_path,
+                os.path.join(paths["output"], "cleanup-plan.json"),
+                *[chunk["path"] for chunk in chunks],
+                *[shard["path"] for shard in shards]
+            ],
+            "sidecar_stage_transition_hint": "insight-trace sidecar may clean stage temp paths after observing next stage _SUCCESS"
+        }
+        cleanup_path = os.path.join(paths["output"], "cleanup-plan.json")
+        with open(cleanup_path, "w") as cf:
+            cf.write(json.dumps(cleanup_plan, indent=2))
+        print("[preprocess] cleanup-plan written", flush=True)
+        for marker_path, marker_value in [
+            ("/mnt/capacity/preprocess-capacity.marker", "capacity-tier-preprocess\n"),
+            ("/mnt/metadata/preprocess-metadata.marker", "metadata-randomio-preprocess\n"),
+        ]:
+            os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+            with open(marker_path, "w") as marker:
+                marker.write(marker_value)
+        print("[preprocess] storage tier marker files written", flush=True)
+        print(f"[preprocess] complete: base_dir={base_dir} chunks={len(chunks)} shards={len(shards)}", flush=True)
+      env:
+      - name: PREPROCESS_BASE_DIR
+        value: "/work/preprocess"
+      - name: WORKFLOW_NAME
+        value: "{{workflow.name}}"
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      - name: workdir
+        mountPath: /work
+      - name: preprocess-capacity-data
+        mountPath: /mnt/capacity
+      - name: metadata-randomio-data
+        mountPath: /mnt/metadata
+
+  - name: train-step
+    metadata:
+      labels:
+        pipeline-stage: training
+        integration.keti.io/stage: training
+        workload.keti.io/type: training
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: main
+        storage.keti.io/dataset-size: "20Gi"
+        storage.keti.io/prefetch: "true"
+        storage.keti.io/latency: "low"
+        storage.keti.io/locality: "same-node-preferred"
+        storage.keti.io/cache-aware: "true"
+    inputs:
+      parameters:
+      - name: model-type
+      - name: dataset
+      artifacts:
+      - name: preprocess-artifact
+        path: /work/preprocess
+    outputs:
+      artifacts:
+      - name: trained-preprocess-artifact
+        path: /work/preprocess
+    container:
+      image: python:3.11-slim
+      command: ["python3", "-c"]
+      args:
+      - |
+        import hashlib
+        import json
+        import os
+        import sys
+        import time
+
+        model_type = "{{inputs.parameters.model-type}}"
+        dataset = "{{inputs.parameters.dataset}}"
+        base_dir = os.environ.get("PREPROCESS_BASE_DIR", "/work/preprocess")
+        model_dir = os.path.join(base_dir, "model")
+        train_log_dir = os.path.join(base_dir, "train/logs")
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(train_log_dir, exist_ok=True)
+        print(f"[train] start: model={model_type} dataset={dataset}", flush=True)
+
+        manifest_path = os.path.join(base_dir, "manifest.json")
+        metadata_path = os.path.join(base_dir, "index/metadata-index.json")
+        for required in [manifest_path, metadata_path]:
+            if not os.path.exists(required):
+                print(f"[train] required file missing: {required}", flush=True)
+                sys.exit(1)
+
+        with open(manifest_path) as mf:
+            manifest = json.loads(mf.read())
+        with open(metadata_path) as mf:
+            metadata_index = json.loads(mf.read())
+
+        chunk_count = manifest["chunk_count"]
+        shard_count = manifest["shard_count"]
+        print(f"[train] chunk_count={chunk_count} shard_count={shard_count}", flush=True)
+
+        for shard in metadata_index["shards"]:
+            if not os.path.exists(shard["path"]):
+                print(f"[train] shard file missing: {shard['path']}", flush=True)
+                sys.exit(1)
+        print("[train] shard files verified", flush=True)
+
+        total_hash = 0
+        for epoch in range(1, 6):
+            epoch_hash = hashlib.sha256()
+            for chunk in metadata_index["chunks"]:
+                path = chunk["path"]
+                if not os.path.exists(path):
+                    print(f"[train] chunk file missing: {path}", flush=True)
+                    sys.exit(1)
+                with open(path, "rb") as f:
+                    payload = f.read()
+                for _ in range(30):
+                    payload = hashlib.sha256(payload).digest()
+                epoch_hash.update(payload)
+
+            digest = epoch_hash.hexdigest()
+            total_hash += int(digest[:8], 16)
+            with open(os.path.join(train_log_dir, f"epoch_{epoch:02d}.log"), "w") as lf:
+                lf.write(f"epoch={epoch}\ndigest={digest}\n")
+            print(f"[train] epoch={epoch} digest={digest[:16]}", flush=True)
+            time.sleep(1.2)
+
+        model_meta = {
+            "model_type": model_type,
+            "dataset": dataset,
+            "epochs": 5,
+            "hash_score": total_hash,
+            "manifest_path": manifest_path,
+            "metadata_index_path": metadata_path,
+            "chunk_count": chunk_count,
+            "shard_count": shard_count
+        }
+        with open(os.path.join(model_dir, "model.json"), "w") as mf:
+            mf.write(json.dumps(model_meta))
+        os.makedirs("/mnt/performance", exist_ok=True)
+        with open("/mnt/performance/training-performance.marker", "w") as marker:
+            marker.write(f"model={model_type} dataset={dataset} chunks={chunk_count} shards={shard_count}\n")
+        os.makedirs("/mnt/metadata", exist_ok=True)
+        with open("/mnt/metadata/training-metadata.marker", "w") as marker:
+            marker.write("metadata-randomio-train\n")
+        print("[train] storage tier marker files written", flush=True)
+        print("[train] complete: model artifact created", flush=True)
+      env:
+      - name: PREPROCESS_BASE_DIR
+        value: "/work/preprocess"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      - name: workdir
+        mountPath: /work
+      - name: training-performance-data
+        mountPath: /mnt/performance
+      - name: metadata-randomio-data
+        mountPath: /mnt/metadata
+
+  - name: evaluate-step
+    metadata:
+      labels:
+        pipeline-stage: evaluation
+        integration.keti.io/stage: evaluation
+        workload.keti.io/type: inference
+      annotations:
+        mlops.keti.io/main-container: main
+        storage.keti.io/dataset-size: "20Gi"
+        storage.keti.io/prefetch: "true"
+        storage.keti.io/latency: "low"
+        storage.keti.io/locality: "same-node-preferred"
+        storage.keti.io/cache-aware: "true"
+    inputs:
+      artifacts:
+      - name: trained-preprocess-artifact
+        path: /work/preprocess
+    container:
+      image: python:3.11-slim
+      command: ["python3", "-c"]
+      args:
+      - |
+        import json
+        import os
+        import random
+        import statistics
+        import sys
+        import time
+
+        base_dir = os.environ.get("PREPROCESS_BASE_DIR", "/work/preprocess")
+        reports_dir = os.path.join(base_dir, "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        print("[eval] start: loading model artifact", flush=True)
+
+        model_path = os.path.join(base_dir, "model/model.json")
+        placement_path = os.path.join(base_dir, "output/placement-plan.json")
+        for required in [model_path, placement_path]:
+            if not os.path.exists(required):
+                print(f"[eval] required file missing: {required}", flush=True)
+                sys.exit(1)
+
+        with open(model_path) as mf:
+            model = json.loads(mf.read())
+        with open(placement_path) as pf:
+            placement_plan = json.loads(pf.read())
+        print(f"[eval] placement_mode={placement_plan['placement_mode']} target_storage={placement_plan['target_storage']}", flush=True)
+
+        latencies = []
+        scores = []
+        for batch in range(1, 41):
+            seed = (model["hash_score"] + batch) % 100000
+            random.seed(seed)
+            latency_ms = 25 + random.randint(0, 70)
+            score = 0.82 + (random.randint(0, 120) / 1000.0)
+            latencies.append(latency_ms)
+            scores.append(min(score, 0.98))
+            with open(os.path.join(reports_dir, f"batch_{batch:03d}.json"), "w") as bf:
+                bf.write(json.dumps({"batch": batch, "latency_ms": latency_ms, "score": score}))
+            if batch % 10 == 0:
+                print(f"[eval] processed batch={batch}", flush=True)
+            time.sleep(0.15)
+
+        report = {
+            "model_type": model["model_type"],
+            "dataset": model["dataset"],
+            "batches": len(scores),
+            "avg_score": round(statistics.mean(scores), 4),
+            "p95_latency_ms": sorted(latencies)[int(len(latencies) * 0.95) - 1],
+            "placement_mode": placement_plan["placement_mode"],
+            "target_storage": placement_plan["target_storage"]
+        }
+        report_path = os.path.join(reports_dir, "evaluation-report.json")
+        with open(report_path, "w") as rf:
+            rf.write(json.dumps(report))
+        os.makedirs("/mnt/performance", exist_ok=True)
+        with open("/mnt/performance/evaluation-performance.marker", "w") as marker:
+            marker.write(f"batches={report['batches']} p95_latency_ms={report['p95_latency_ms']}\n")
+        os.makedirs("/mnt/capacity", exist_ok=True)
+        with open("/mnt/capacity/evaluation-capacity.marker", "w") as marker:
+            marker.write("capacity-tier-evaluate\n")
+        print("[eval] storage tier marker files written", flush=True)
+        print(f"[eval] complete: report_path={report_path} report={report}", flush=True)
+      env:
+      - name: PREPROCESS_BASE_DIR
+        value: "/work/preprocess"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      - name: workdir
+        mountPath: /work
+      - name: training-performance-data
+        mountPath: /mnt/performance
+      - name: preprocess-capacity-data
+        mountPath: /mnt/capacity

@@ -1,0 +1,170 @@
+###############################################################################
+# BERT Inference Workload
+# - Type: TEXT (NLP)
+# - Framework: PyTorch + HuggingFace
+# - Stage: Inference
+# - Deployment (지속 실행)
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bert-inference
+  namespace: ai-workload-test
+  labels:
+    app: bert-inference
+    workload-type: text
+    framework: pytorch
+    stage: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bert-inference
+  template:
+    metadata:
+      labels:
+        app: bert-inference
+        workload-type: text
+        framework: pytorch
+    spec:
+      schedulerName: ai-storage-scheduler
+
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+      shareProcessNamespace: true
+
+      containers:
+      #=========================================================================
+      # BERT Inference Container
+      #=========================================================================
+      - name: inference
+        image: python:3.11-slim
+        command:
+        - python3
+        - -c
+        - |
+          import time
+          import sys
+          import os
+          import random
+
+          # 프로세스 이름 - bert, transformer, pytorch 키워드 포함
+          sys.argv[0] = 'bert_transformer_pytorch_inference.py'
+
+          print("=" * 60)
+          print("KETI AI Storage - BERT Inference Service")
+          print("=" * 60)
+          print(f"Framework: PyTorch + HuggingFace Transformers")
+          print(f"Model: BERT-base-uncased")
+          print(f"Task: Text Classification / NER")
+          print("=" * 60)
+
+          os.makedirs('/models/bert', exist_ok=True)
+          os.makedirs('/data/results', exist_ok=True)
+
+          # 모델 로딩 시뮬레이션
+          print("Loading BERT model...")
+          with open('/models/bert/config.json', 'w') as f:
+              f.write('{"model": "bert-base-uncased", "hidden_size": 768}')
+          with open('/models/bert/pytorch_model.bin', 'wb') as f:
+              f.write(os.urandom(50 * 1024 * 1024))  # 50MB
+          print("Model loaded!")
+
+          request_count = 0
+          while True:
+              request_count += 1
+
+              # 추론 요청 처리 시뮬레이션
+              batch_size = random.randint(8, 32)
+              seq_length = random.randint(64, 512)
+
+              # 입력 텐서 생성 (Read)
+              with open('/data/input_batch.bin', 'wb') as f:
+                  f.write(os.urandom(batch_size * seq_length * 4))
+
+              # 추론 시간 시뮬레이션
+              inference_time = random.uniform(0.05, 0.2)
+              time.sleep(inference_time)
+
+              # 결과 저장 (Write)
+              with open(f'/data/results/output_{request_count % 100}.json', 'w') as f:
+                  f.write(f'{{"request": {request_count}, "batch_size": {batch_size}, "latency_ms": {inference_time*1000:.2f}}}')
+
+              if request_count % 10 == 0:
+                  print(f"[{time.strftime('%H:%M:%S')}] Request #{request_count}: batch={batch_size}, seq_len={seq_length}, latency={inference_time*1000:.1f}ms")
+
+              time.sleep(2)  # 2초 간격으로 요청
+
+        ports:
+        - containerPort: 8080
+          name: http
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        volumeMounts:
+        - name: model-volume
+          mountPath: /models
+        - name: data-volume
+          mountPath: /data
+
+      #=========================================================================
+      # Insight-Trace Sidecar
+      #=========================================================================
+      - name: insight-trace
+        image: ketidevit2/insight-trace:latest
+        imagePullPolicy: Always
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: APOLLO_ENDPOINT
+          value: "apollo-policy-server.keti.svc.cluster.local:50051"
+        - name: METRICS_INTERVAL
+          value: "5s"
+        - name: ANALYSIS_INTERVAL
+          value: "10s"
+        - name: REPORT_INTERVAL
+          value: "30s"
+        ports:
+        - containerPort: 9090
+          name: http
+        - containerPort: 9091
+          name: grpc
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+        volumeMounts:
+        - name: model-volume
+          mountPath: /models
+          readOnly: true
+        - name: data-volume
+          mountPath: /data
+          readOnly: true
+
+      volumes:
+      - name: model-volume
+        emptyDir:
+          sizeLimit: 500Mi
+      - name: data-volume
+        emptyDir:
+          sizeLimit: 500Mi

@@ -1,0 +1,42 @@
+# =============================================================================
+# Kueue ResourceFlavors - 노드 그룹별 리소스 특성 정의
+# =============================================================================
+# ResourceFlavor는 클러스터 내 노드 그룹의 특성을 정의합니다.
+# 노드 레이블을 사용하여 특정 유형의 노드를 선택합니다.
+# =============================================================================
+
+---
+# 1. Default Flavor - 일반 워커 노드
+# 용도: 일반적인 워크로드 (특별한 하드웨어 요구 없음)
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: default-flavor
+spec:
+  nodeLabels:
+    node-role.kubernetes.io/worker: ""
+  # tolerations: []  # 필요시 tolerations 추가 가능
+
+---
+# 2. CSD Flavor - Computational Storage Device 노드
+# 용도: 스토리지 집약적 워크로드, 데이터 전처리
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: csd-flavor
+spec:
+  nodeLabels:
+    csd.enabled: "true"
+  # CSD 노드에서만 실행되도록 레이블 지정
+
+---
+# 3. GPU Flavor - GPU 탑재 노드
+# 용도: AI/ML 학습, 추론 워크로드
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: gpu-flavor
+spec:
+  nodeLabels:
+    nvidia.com/gpu: "present"
+  # GPU가 있는 노드에서만 실행

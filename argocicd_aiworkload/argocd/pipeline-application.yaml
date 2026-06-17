@@ -1,0 +1,39 @@
+###############################################################################
+# Argo CD Application for Kubeflow Pipelines
+# GitHub: https://github.com/KETI-AI-Storage/argocicd_aiworload
+# Target: kubeflow-user-example-com namespace
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-kubeflow-pipelines
+  namespace: argocd
+  labels:
+    project: keti-ai-storage
+    component: pipeline
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/argocicd_aiworload.git
+    targetRevision: main
+    path: pipelines
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kubeflow-user-example-com
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - Replace=true  # Workflow는 immutable이라 교체 필요
+
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m

@@ -1,0 +1,52 @@
+# Loadbalance 데모 전용 노드 부하/분포 시뮬레이션.
+#
+# 목적: ai-storage-orchestrator/pkg/controller/loadbalancing.go:calculateLoadSpreadingPlan
+#       이 plan 을 생성하려면 overloaded(>cpuThreshold) 와 underloaded(<50%) 노드가
+#       동시에 존재해야 한다.
+#       gpu-server-03 에 idle Pod 8 개를 nodeName 으로 강제 배치해 Pod 분포 불균형을 만든다.
+#       Apollo CR 측 parameters.cpuThreshold=1 / scope=all 와 함께 사용하면 plan 이 생성된다.
+#
+# Author: 미정
+# Created: 2026-05-26
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-lb
+  labels:
+    demo.keti.io/component: loadbalance
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-lb-decoy
+  namespace: demo-lb
+  labels:
+    demo.keti.io/component: loadbalance
+spec:
+  replicas: 8
+  selector:
+    matchLabels: { app: demo-lb-decoy }
+  template:
+    metadata:
+      labels:
+        app: demo-lb-decoy
+        demo.keti.io/component: loadbalance
+      # WHY: webhook 이 insight-trace 사이드카를 inject 한 경우에도 idle 컨테이너가
+      #      종료(수동 종료/migration) 되었을 때 사이드카가 함께 종료되어 정리되도록
+      #      main container 를 명시한다.
+      annotations:
+        insight-trace.keti.io/main-container: "idle"
+        mlops.keti.io/main-container: "idle"
+    spec:
+      # WARNING: nodeName 으로 한 노드에 모두 강제 배치해 Pod 분포 차이를 만든다.
+      #          시연 환경에서 gpu-server-03 외의 노드를 쓰면 이 값을 변경한다.
+      nodeName: gpu-server-03
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: idle
+          image: busybox:1.36
+          command: ["sh", "-c", "while true; do sleep 30; done"]
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"

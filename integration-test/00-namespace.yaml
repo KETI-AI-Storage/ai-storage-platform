@@ -1,0 +1,10 @@
+# ============================================
+# KETI AI Storage System - Integration Test Namespace
+# ============================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-workload-test
+  labels:
+    purpose: integration-test
+    project: keti-ai-storage

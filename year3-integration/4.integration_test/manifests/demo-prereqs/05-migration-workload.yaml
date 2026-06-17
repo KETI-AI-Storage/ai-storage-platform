@@ -1,0 +1,72 @@
+# Migration 데모 전용 워크로드.
+#
+# 목적:
+#   - 시연 워크로드(cpu-preprocessing-pipeline-workload)는 ReadWriteOnce PVC
+#     (storage-burst / NFS) 를 사용하기 때문에 다른 노드로 옮기는 순간
+#     Multi-Attach Error 로 Pending 에 빠진다. 이 매니페스트는 _PVC 없는_
+#     단순 Deployment 1 개를 같은 namespace 에 띄워, migration 정책이 실제로
+#     Running 상태의 migrated Pod 을 만들 수 있도록 한다.
+#
+#   - 11번 비교 스크립트의 migration 검증이 같은 namespace 의
+#     `migration.ai-storage/job=true` 라벨 Pod 을 찾기 때문에 namespace 는
+#     반드시 시연 워크로드와 동일해야 한다(k8s-admission-webhook).
+#
+#   - sourceNode 는 Apollo 의 resolveMigrationPod 가 Pod 의 spec.nodeName 에서
+#     자동으로 채우고, targetNode 는 pickAlternateNode 가 alphabetical 첫 워커를
+#     자동 선택한다. 따라서 워크로드를 한 노드에 박아만 두면 자동으로 다른 노드로 옮겨진다.
+#
+# 사용:
+#   - 00.demo-prereqs-setup.sh 가 자동으로 적용한다.
+#   - 환경별로 nodeName 을 바꾸려면 DEMO_MIGRATION_SOURCE_NODE 환경변수 사용.
+#
+# Author: 미정
+# Created: 2026-05-26
+# Related:
+#   - apollo/orchestration-policy-engine/internal/controller/orchestrationpolicy_controller.go
+#     (resolveMigrationPod / pickAlternateNode)
+#   - ai-storage-orchestrator/pkg/k8s/client.go:CreateOptimizedPod
+#   - year3-integration/4.integration_test/scripts/demo/scenario2/11.orchestration-compare.sh
+#     (migration 분기 PASS 조건)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-migration-workload
+  namespace: ope-model-verify
+  labels:
+    app: demo-migration-workload
+    demo.keti.io/component: migration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-migration-workload
+  template:
+    metadata:
+      labels:
+        app: demo-migration-workload
+        demo.keti.io/component: migration
+    spec:
+      # WARNING: nodeName 은 setup 스크립트가 DEMO_MIGRATION_SOURCE_NODE 로 치환한다.
+      #          반드시 gpu-server-03 자리에 그대로 두고, 환경별 치환은 sed 가 담당한다.
+      nodeName: gpu-server-03
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: idle
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # WHY: migration 도중 컨테이너 상태가 running 으로 유지되어야
+              #      orchestrator 의 GetPodContainerStates 가 ShouldMigrate=true 로 판정한다.
+              while true; do
+                date
+                sleep 30
+              done
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"

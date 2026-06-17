@@ -1,0 +1,204 @@
+# =============================================================================
+# Kueue Gang Scheduling Demo
+# =============================================================================
+# 시나리오:
+# 1. resource-blocker가 자원을 점유 (CPU 2개)
+# 2. Gang jobs 제출 → Kueue 큐에서 대기
+# 3. blocker 삭제 → 자원 해제 → Gang jobs 동시 스케줄링
+# =============================================================================
+---
+# Resource Blocker - 자원 점유용 Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: resource-blocker
+  namespace: ai-workload-test
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    purpose: blocker
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        purpose: blocker
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: blocker
+        image: busybox:latest
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "RESOURCE BLOCKER - Occupying Resources"
+          echo "=========================================="
+          echo "CPU Request: 2 cores"
+          echo "Memory Request: 2Gi"
+          echo ""
+          echo "This job blocks resources until deleted."
+          echo "Delete this job to trigger Gang Scheduling!"
+          echo ""
+          echo "Command: kubectl delete job resource-blocker -n ai-workload-test"
+          echo "=========================================="
+          echo ""
+          echo "Sleeping for 1 hour (or until deleted)..."
+          sleep 3600
+        resources:
+          requests:
+            cpu: "2"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+  backoffLimit: 0
+---
+# Gang Master - blocker 해제 후 스케줄됨
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-demo-master
+  namespace: ai-workload-test
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    gang-group: demo-training
+    role: master
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        gang-group: demo-training
+        role: master
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: master
+        image: busybox:latest
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "GANG DEMO - MASTER"
+          echo "=========================================="
+          echo "Node: $(cat /etc/hostname)"
+          echo "Started at: $(date)"
+          echo ""
+          echo "Gang Scheduling SUCCESS!"
+          echo "Master and all workers started together."
+          echo ""
+          for i in 1 2 3 4 5; do
+            echo "[Master] Training epoch $i/5..."
+            sleep 3
+          done
+          echo ""
+          echo "Training complete!"
+          echo "=========================================="
+        resources:
+          requests:
+            cpu: "300m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+  backoffLimit: 2
+---
+# Gang Worker 1
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-demo-worker-1
+  namespace: ai-workload-test
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    gang-group: demo-training
+    role: worker
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        gang-group: demo-training
+        role: worker
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: busybox:latest
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "GANG DEMO - WORKER 1"
+          echo "=========================================="
+          echo "Node: $(cat /etc/hostname)"
+          echo "Started at: $(date)"
+          echo ""
+          for i in 1 2 3 4 5; do
+            echo "[Worker-1] Processing batch $i/5..."
+            sleep 3
+          done
+          echo "Worker-1 complete!"
+          echo "=========================================="
+        resources:
+          requests:
+            cpu: "300m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+  backoffLimit: 2
+---
+# Gang Worker 2
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-demo-worker-2
+  namespace: ai-workload-test
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    gang-group: demo-training
+    role: worker
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        gang-group: demo-training
+        role: worker
+    spec:
+      schedulerName: ai-storage-scheduler
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: busybox:latest
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "GANG DEMO - WORKER 2"
+          echo "=========================================="
+          echo "Node: $(cat /etc/hostname)"
+          echo "Started at: $(date)"
+          echo ""
+          for i in 1 2 3 4 5; do
+            echo "[Worker-2] Processing batch $i/5..."
+            sleep 3
+          done
+          echo "Worker-2 complete!"
+          echo "=========================================="
+        resources:
+          requests:
+            cpu: "300m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+  backoffLimit: 2

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-workload-test
+  labels:
+    project: keti-ai-storage
+    managed-by: argocd

@@ -1,0 +1,18 @@
+# Gluesys L2 (NVMe / Hot Data) tier StorageClass.
+# 용도: 전처리 입력, 학습 입력, 추론 입력, hot-data, low latency.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-l2
+  labels:
+    storage.keti.io/tier: L2
+    storage.keti.io/tier-role: nvme-hot
+    storage.keti.io/gluesys-tier: "true"
+provisioner: cluster.local/nfs-subdir-external-provisioner
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  tier: L2
+  tierRole: nvme-hot
+  dataClass: hot

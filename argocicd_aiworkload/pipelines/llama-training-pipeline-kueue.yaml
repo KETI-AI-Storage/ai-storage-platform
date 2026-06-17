@@ -1,0 +1,274 @@
+###############################################################################
+# LLaMA Training Pipeline + Kueue + Insight-Trace 사이드카
+#
+# 구조:
+#   - preprocess: Argo Pod + Insight-Trace Sidecar (AI Storage Scheduler)
+#   - train: PyTorchJob + Insight-Trace Sidecar (Kueue + AI Storage Scheduler)
+#   - evaluate: Argo Pod + Insight-Trace Sidecar (AI Storage Scheduler)
+#
+# 워크로드 특성 자동 감지:
+#   Insight-Trace 사이드카 → APOLLO → AI Storage Scheduler
+#   (io-pattern, preprocessing-type 등 수동 annotation 불필요)
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: llama-pipeline-kueue
+  namespace: kubeflow-user-example-com
+  labels:
+    app: llama-pipeline
+spec:
+  entrypoint: llama-pipeline
+  serviceAccountName: default-editor
+
+  # 공유 볼륨
+  volumes:
+  - name: pipeline-data
+    emptyDir:
+      sizeLimit: 500Mi
+
+  templates:
+  ###########################################################################
+  # 메인 DAG
+  ###########################################################################
+  - name: llama-pipeline
+    dag:
+      tasks:
+      - name: preprocess
+        template: preprocess-step
+
+      - name: train
+        template: create-pytorchjob
+        dependencies: [preprocess]
+
+      - name: evaluate
+        template: evaluate-step
+        dependencies: [train]
+
+  ###########################################################################
+  # Step 1: 전처리 + Insight-Trace 사이드카
+  ###########################################################################
+  - name: preprocess-step
+    schedulerName: ai-storage-scheduler
+    tolerations:
+    - operator: Exists
+    container:
+      image: python:3.11-slim
+      name: main
+      command: [python3, -c]
+      args:
+      - |
+        import time, os
+        print("=" * 50)
+        print("[STEP 1] Data Preprocessing")
+        print(f"Node: {os.environ.get('NODE_NAME', 'unknown')}")
+        print("=" * 50)
+        for stage in ['tokenize', 'batch', 'save']:
+            print(f"Processing: {stage}...")
+            time.sleep(5)
+        print("[STEP 1] DONE!")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data
+    # Insight-Trace 사이드카: I/O 패턴 분석 → APOLLO 전송
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      - name: CONTAINER_NAME
+        value: "main"
+      - name: METRICS_INTERVAL_SECONDS
+        value: "5"
+      - name: ANALYSIS_INTERVAL_SECONDS
+        value: "10"
+      - name: REPORT_INTERVAL_SECONDS
+        value: "15"
+      - name: APOLLO_ENDPOINT
+        value: "apollo-policy-server.keti.svc.cluster.local:50051"
+      resources:
+        requests:
+          cpu: "20m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
+
+  ###########################################################################
+  # Step 2: PyTorchJob 생성 (Kueue + Insight-Trace 사이드카)
+  ###########################################################################
+  - name: create-pytorchjob
+    resource:
+      action: create
+      successCondition: status.replicaStatuses.Master.succeeded > 0
+      failureCondition: status.replicaStatuses.Master.failed > 0
+      manifest: |
+        apiVersion: kubeflow.org/v1
+        kind: PyTorchJob
+        metadata:
+          generateName: llama-train-
+          namespace: kubeflow-user-example-com
+          labels:
+            kueue.x-k8s.io/queue-name: ai-storage-queue
+            workflow-name: "{{workflow.name}}"
+        spec:
+          pytorchReplicaSpecs:
+            Master:
+              replicas: 1
+              restartPolicy: OnFailure
+              template:
+                spec:
+                  schedulerName: ai-storage-scheduler
+                  tolerations:
+                  - operator: Exists
+                  containers:
+                  # 메인 학습 컨테이너
+                  - name: pytorch
+                    image: python:3.11-slim
+                    command: [python3, -c]
+                    args:
+                    - |
+                      import time, os, random
+                      print("=" * 50)
+                      print("[STEP 2] Model Training (PyTorchJob + Kueue)")
+                      print(f"Node: {os.environ.get('HOSTNAME', 'unknown')}")
+                      print("=" * 50)
+                      print("Kueue가 이 Job을 관리합니다!")
+                      print("")
+                      for epoch in range(2):
+                          print(f"Epoch {epoch+1}/2")
+                          for step in range(3):
+                              loss = 2.0 - epoch*0.3 - step*0.1 + random.uniform(-0.05, 0.05)
+                              print(f"  Step {step+1}: loss={loss:.4f}")
+                              time.sleep(5)
+                      print("")
+                      print("[STEP 2] Training DONE!")
+                    resources:
+                      requests:
+                        cpu: "200m"
+                        memory: "256Mi"
+                  # Insight-Trace 사이드카
+                  - name: insight-trace
+                    image: ketidevit2/insight-trace:latest
+                    env:
+                    - name: POD_NAME
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.name
+                    - name: POD_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.namespace
+                    - name: NODE_NAME
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: spec.nodeName
+                    - name: CONTAINER_NAME
+                      value: "pytorch"
+                    - name: METRICS_INTERVAL_SECONDS
+                      value: "5"
+                    - name: ANALYSIS_INTERVAL_SECONDS
+                      value: "10"
+                    - name: REPORT_INTERVAL_SECONDS
+                      value: "15"
+                    - name: APOLLO_ENDPOINT
+                      value: "apollo-policy-server.keti.svc.cluster.local:50051"
+                    resources:
+                      requests:
+                        cpu: "20m"
+                        memory: "32Mi"
+                      limits:
+                        cpu: "100m"
+                        memory: "64Mi"
+
+  ###########################################################################
+  # Step 3: 평가 + Insight-Trace 사이드카
+  ###########################################################################
+  - name: evaluate-step
+    schedulerName: ai-storage-scheduler
+    tolerations:
+    - operator: Exists
+    container:
+      image: python:3.11-slim
+      name: main
+      command: [python3, -c]
+      args:
+      - |
+        import time, os, random
+        print("=" * 50)
+        print("[STEP 3] Model Evaluation")
+        print(f"Node: {os.environ.get('NODE_NAME', 'unknown')}")
+        print("=" * 50)
+        for i in range(3):
+            print(f"Evaluating batch {i+1}/3...")
+            time.sleep(3)
+        accuracy = random.uniform(0.85, 0.95)
+        print(f"Final Accuracy: {accuracy:.2%}")
+        print("=" * 50)
+        print("PIPELINE COMPLETED!")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data
+    # Insight-Trace 사이드카
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      - name: CONTAINER_NAME
+        value: "main"
+      - name: METRICS_INTERVAL_SECONDS
+        value: "5"
+      - name: ANALYSIS_INTERVAL_SECONDS
+        value: "10"
+      - name: REPORT_INTERVAL_SECONDS
+        value: "15"
+      - name: APOLLO_ENDPOINT
+        value: "apollo-policy-server.keti.svc.cluster.local:50051"
+      resources:
+        requests:
+          cpu: "20m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"

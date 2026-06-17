@@ -1,0 +1,160 @@
+# Multi-PVC layout: 각 PVC는 서로 다른 StorageClass를 지정할 수 있음 (스토리지 티 분리).
+# 예: data=ssd, checkpoint=capacity, cache=burst, output=archive — 클러스터에 맞게 metadata.storageClassName 조정.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keti
+  labels:
+    name: keti
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: insight-hub-data
+  namespace: keti
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: performance  # 메타·SQLite
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: insight-hub-checkpoint
+  namespace: keti
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: capacity
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: insight-hub-cache
+  namespace: keti
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: burst
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: insight-hub-output
+  namespace: keti
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: archive
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insight-hub
+  namespace: keti
+  labels:
+    app: insight-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: insight-hub
+  template:
+    metadata:
+      labels:
+        app: insight-hub
+    spec:
+      # Schedule on control-plane so a single `docker build` + `ctr -n k8s.io import` on the master works.
+      # To run on workers instead, load insight-hub:latest into each worker's containerd or use a registry.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: insight-hub
+          # Build locally and load into nodes (e.g. ctr import), or push to your registry and set pull policy.
+          image: insight-hub:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 50056
+              name: grpc
+            - containerPort: 8081
+              name: http
+          env:
+            - name: GRPC_PORT
+              value: "50056"
+            - name: DATA_DIR
+              value: "/data"
+            - name: CHECKPOINT_DIR
+              value: "/checkpoint"
+            - name: CACHE_DIR
+              value: "/cache"
+            - name: OUTPUT_DIR
+              value: "/output"
+            - name: SQLITE_PATH
+              value: "/data/insight-hub.db"
+            - name: RETENTION_DAYS
+              value: "14"
+            - name: HTTP_PORT
+              value: "8081"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: checkpoint
+              mountPath: /checkpoint
+            - name: cache
+              mountPath: /cache
+            - name: output
+              mountPath: /output
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: insight-hub-data
+        - name: checkpoint
+          persistentVolumeClaim:
+            claimName: insight-hub-checkpoint
+        - name: cache
+          persistentVolumeClaim:
+            claimName: insight-hub-cache
+        - name: output
+          persistentVolumeClaim:
+            claimName: insight-hub-output
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: insight-hub
+  namespace: keti
+  labels:
+    app: insight-hub
+spec:
+  selector:
+    app: insight-hub
+  ports:
+    - name: grpc
+      port: 50056
+      targetPort: 50056
+    - name: http
+      port: 8081
+      targetPort: 8081

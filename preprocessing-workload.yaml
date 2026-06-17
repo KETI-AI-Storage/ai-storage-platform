@@ -1,0 +1,55 @@
+# 샘플 전처리 워크로드. 네임스페이스 label 로 웹훅이 insight-trace 사이드카를 붙일 수 있음.
+# Insight Hub 저장: 이 파드 "이름"이 아니라, 파드가 스케줄된 노드의 노드 메트릭이 insight-scope → Hub 로 들어감.
+# Verify: insight-hub/scripts/insight-hub.shd
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-admission-webhook
+  labels:
+    keti-ai-storage-injection: enabled
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: preprocessing-data
+  namespace: k8s-admission-webhook
+  labels:
+    stage: preprocess
+    gpuCount: "0"
+    workload.keti.io/stage: preprocess
+    workload.keti.io/type: preprocessing
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preprocessing-workload
+  namespace: k8s-admission-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: preprocessing-workload
+  template:
+    metadata:
+      labels:
+        app: preprocessing-workload
+        stage: preprocess
+    spec:
+      containers:
+        - name: workload
+          image: busybox:1.36
+          command: ["sh", "-c", "echo workload-start; ls -la /data; sleep 3600"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: preprocessing-data

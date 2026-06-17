@@ -1,0 +1,270 @@
+# image-augmentation-preprocessing-workload.yaml
+# CIFAR-10 전처리 tensor에 augmentation을 미리 적용해 학습 캐시를 생성하는 Job.
+#
+# Author: 미정 <unknown@example.com>
+# Created: 2026-05-28
+#
+# 설계 의도:
+# - 입력 PVC(/data/preprocessed)는 train.pt를 large-read로 읽는다 → L2 기대.
+# - 캐시 PVC(/data/augmented)는 augmented_train.pt를 epoch마다 반복 조회 → L1 기대.
+# - 로그 PVC(/data/logs)는 archive 성격 → S3 기대.
+# - storageClassName은 의도적으로 비워 둔다. ai-storage webhook이 PVC annotation을 보고 주입한다.
+# - schedulerName / insight-trace sidecar / shareProcessNamespace는 webhook이 주입한다.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-storage-workloads
+  labels:
+    keti-ai-storage-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: image-augmentation-workload
+  namespace: ai-storage-workloads
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: image-augmentation-workload-pod-reader
+  namespace: ai-storage-workloads
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: image-augmentation-workload-pod-reader
+  namespace: ai-storage-workloads
+subjects:
+  - kind: ServiceAccount
+    name: image-augmentation-workload
+    namespace: ai-storage-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: image-augmentation-workload-pod-reader
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-augmentation-input-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: preprocessing
+    storage.keti.io/data-role: preprocessing-input
+    storage.keti.io/priority: high
+    storage.keti.io/io-pattern: large-read
+    storage.keti.io/latency: low
+  labels:
+    app: image-augmentation-preprocessing-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-augmentation-cache-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: preprocessing
+    storage.keti.io/data-role: cache
+    storage.keti.io/access-pattern: repeated
+    storage.keti.io/latency: ultra-low
+  labels:
+    app: image-augmentation-preprocessing-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-augmentation-result-log-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: archive
+    storage.keti.io/data-role: result-backup
+    storage.keti.io/priority: low
+  labels:
+    app: image-augmentation-preprocessing-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: image-augmentation-preprocessing-workload
+  namespace: ai-storage-workloads
+  labels:
+    app: image-augmentation-preprocessing-workload
+    workload.keti.io/type: preprocessing
+    workload.keti.io/stage: augmentation
+    workload.keti.io/framework: pytorch
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: image-augmentation-preprocessing-workload
+        workload.keti.io/type: preprocessing
+        workload.keti.io/stage: augmentation
+        workload.keti.io/framework: pytorch
+      annotations:
+        # insight-trace sidecar가 main container 종료를 감지하도록 명시.
+        mlops.keti.io/main-container: augment
+        insight-trace.keti.io/main-container: augment
+    spec:
+      serviceAccountName: image-augmentation-workload
+      restartPolicy: Never
+      containers:
+        - name: augment
+          image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args:
+            - |
+              python3 -u /opt/workloads/image_augmentation_preprocess.py
+          env:
+            - name: INPUT_PATH
+              value: /data/preprocessed/train.pt
+            - name: AUGMENTED_DIR
+              value: /data/augmented
+            - name: LOG_DIR
+              value: /data/logs
+            - name: AUGMENT_PASSES
+              value: "3"
+            - name: CROP_PADDING
+              value: "4"
+            - name: FLIP_PROB
+              value: "0.5"
+            - name: FALLBACK_SAMPLES
+              value: "1024"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "6Gi"
+          volumeMounts:
+            - name: workload-scripts
+              mountPath: /opt/workloads
+            - name: preprocessed
+              mountPath: /data/preprocessed
+            - name: augmented
+              mountPath: /data/augmented
+            - name: result-log
+              mountPath: /data/logs
+      volumes:
+        - name: workload-scripts
+          configMap:
+            name: image-augmentation-preprocess-script
+        - name: preprocessed
+          persistentVolumeClaim:
+            claimName: image-augmentation-input-pvc
+        - name: augmented
+          persistentVolumeClaim:
+            claimName: image-augmentation-cache-pvc
+        - name: result-log
+          persistentVolumeClaim:
+            claimName: image-augmentation-result-log-pvc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-augmentation-preprocess-script
+  namespace: ai-storage-workloads
+data:
+  image_augmentation_preprocess.py: |
+    """augmentation 캐시 생성 entrypoint (ConfigMap 임베드 버전)."""
+    from __future__ import annotations
+    import json, os, time
+    from pathlib import Path
+    import torch
+    import torch.nn.functional as F
+
+    input_path = Path(os.getenv("INPUT_PATH", "/data/preprocessed/train.pt"))
+    augmented_dir = Path(os.getenv("AUGMENTED_DIR", "/data/augmented"))
+    log_dir = Path(os.getenv("LOG_DIR", "/data/logs"))
+    passes = int(os.getenv("AUGMENT_PASSES", "3"))
+    crop_padding = int(os.getenv("CROP_PADDING", "4"))
+    flip_prob = float(os.getenv("FLIP_PROB", "0.5"))
+    fallback_samples = int(os.getenv("FALLBACK_SAMPLES", "1024"))
+    for p in (augmented_dir, log_dir):
+        p.mkdir(parents=True, exist_ok=True)
+
+    started = time.perf_counter()
+    if input_path.exists():
+        payload = torch.load(input_path, map_location="cpu")
+    else:
+        payload = {
+            "images": torch.rand(fallback_samples, 3, 32, 32),
+            "labels": torch.randint(0, 10, (fallback_samples,), dtype=torch.long),
+            "classes": [f"class_{i}" for i in range(10)],
+        }
+    base = payload["images"].float()
+    if base.max() > 1.5:
+        base = base / 255.0
+    labels = payload["labels"]
+    classes = payload.get("classes", [])
+
+    mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(1, 3, 1, 1)
+    std = torch.tensor([0.2470, 0.2435, 0.2616]).view(1, 3, 1, 1)
+    chunks_x, chunks_y = [], []
+    for epoch_idx in range(max(1, passes)):
+        images = base
+        if crop_padding > 0:
+            padded = F.pad(images, [crop_padding] * 4, mode="constant", value=0.0)
+            _, _, h, w = images.shape
+            top = torch.randint(0, padded.shape[2] - h + 1, (1,)).item()
+            left = torch.randint(0, padded.shape[3] - w + 1, (1,)).item()
+            images = padded[:, :, top : top + h, left : left + w]
+        if flip_prob > 0:
+            mask = torch.rand(images.shape[0]) < flip_prob
+            if mask.any():
+                flipped = images.clone()
+                flipped[mask] = torch.flip(images[mask], dims=[-1])
+                images = flipped
+        images = (images - mean) / std
+        chunks_x.append(images)
+        chunks_y.append(labels)
+        print(f"augment pass={epoch_idx} samples={images.shape[0]} shape={list(images.shape)}", flush=True)
+
+    augmented_images = torch.cat(chunks_x, dim=0)
+    augmented_labels = torch.cat(chunks_y, dim=0)
+    output_path = augmented_dir / "augmented_train.pt"
+    torch.save({"images": augmented_images, "labels": augmented_labels, "classes": classes}, output_path)
+
+    summary = {
+        "status": "completed",
+        "input_path": str(input_path),
+        "input_existed": input_path.exists(),
+        "augmented_path": str(output_path),
+        "augmented_samples": int(augmented_images.shape[0]),
+        "augmented_shape": list(augmented_images.shape),
+        "passes": passes,
+        "crop_padding": crop_padding,
+        "flip_prob": flip_prob,
+        "torch_version": torch.__version__,
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+    }
+    (log_dir / "augmentation_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)

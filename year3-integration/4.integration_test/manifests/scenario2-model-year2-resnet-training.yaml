@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ope-model-verify
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: resnet-training-verify-pvc
+  namespace: ope-model-verify
+  labels:
+    workload.keti.io/type: training
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: nfs-client
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: resnet-training-verify
+  namespace: ope-model-verify
+  labels:
+    app: resnet-training-verify
+    workload.keti.io/type: training
+    ai-model: resnet50
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: resnet-training-verify
+        workload.keti.io/type: training
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: training
+          image: python:3.11-slim
+          command:
+            - python3
+            - -c
+            - |
+              import os, sys, time, random
+              sys.argv[0] = "resnet50_torchvision_image_trainer.py"
+              os.makedirs("/data/images", exist_ok=True)
+              os.makedirs("/data/checkpoints", exist_ok=True)
+              print("=== scenario2: year2-style resnet training verify ===", flush=True)
+
+              for i in range(10):
+                  with open(f"/data/images/batch_{i}.bin", "wb") as f:
+                      f.write(os.urandom(1024 * 1024))
+
+              epochs = 2
+              batches = 30
+              for e in range(epochs):
+                  for b in range(batches):
+                      with open(f"/data/images/batch_{b % 10}.bin", "rb") as f:
+                          _ = f.read()
+                      loss = 2.0 - (e * 0.3 + b * 0.01) + random.uniform(-0.05, 0.05)
+                      with open("/data/train.log", "a") as logf:
+                          logf.write(f"epoch={e+1},batch={b},loss={loss:.4f}\n")
+                      if b % 10 == 0:
+                          with open(f"/data/checkpoints/resnet50_e{e+1}_b{b}.pt", "wb") as ckpt:
+                              ckpt.write(os.urandom(8 * 1024 * 1024))
+                      time.sleep(2)
+
+              print("training finished", flush=True)
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: resnet-training-verify-pvc

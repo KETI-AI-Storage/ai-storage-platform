@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace 생성
+resources:
+  - namespace.yaml
+  # TEXT Workloads (NLP)
+  - text/llama-training.yaml
+  - text/bert-inference.yaml
+  # IMAGE Workloads (Computer Vision)
+  - image/resnet-training.yaml
+  - image/yolo-inference.yaml
+
+commonLabels:
+  app.kubernetes.io/managed-by: argocd
+  project: keti-ai-storage

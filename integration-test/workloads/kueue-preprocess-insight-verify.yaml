@@ -1,0 +1,83 @@
+# Kueue Job 전처리 + insight-trace 사이드카 검증용 매니페스트.
+# llama-training-pipeline-kueue.yaml 의 preprocess-step 과 동일한 사이드카 구성,
+# Job 레벨에 kueue.x-k8s.io/queue-name 만 추가해 Kueue 경로를 검증한다.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kueue-preprocess-insight-verify
+  namespace: kubeflow-user-example-com
+  labels:
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+    app: kueue-preprocess-insight-verify
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 2
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: kueue-preprocess-insight-verify
+    spec:
+      restartPolicy: Never
+      schedulerName: ai-storage-scheduler
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: main
+          image: python:3.11-slim
+          command: [python3, "-c"]
+          args:
+            - |
+              import time, os
+              print("=" * 50)
+              print("[Kueue Job] Data Preprocessing (verify)")
+              print(f"Node: {os.environ.get('NODE_NAME', 'unknown')}")
+              print("=" * 50)
+              for stage in ['tokenize', 'batch', 'save']:
+                  print(f"Processing: {stage}...")
+                  time.sleep(5)
+              print("[Kueue Job] DONE — holding for insight-trace checks")
+              time.sleep(120)
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+        - name: insight-trace
+          image: ketidevit2/insight-trace:latest
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CONTAINER_NAME
+              value: "main"
+            - name: METRICS_INTERVAL_SECONDS
+              value: "5"
+            - name: ANALYSIS_INTERVAL_SECONDS
+              value: "10"
+            - name: REPORT_INTERVAL_SECONDS
+              value: "15"
+            - name: APOLLO_ENDPOINT
+              value: "apollo-policy-server.keti.svc.cluster.local:50051"
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"

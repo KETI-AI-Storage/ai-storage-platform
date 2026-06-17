@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package insight.hub.v1;
+
+option go_package = "insight-hub/proto/hubpb";
+
+// Insight Hub: persistent store for node resource history from insight-scope.
+// Forecaster pulls via GetNodeHistory / ListNodes instead of receiving SubmitHistoryData directly.
+service InsightHubService {
+  rpc SubmitHistoryData(SubmitHistoryRequest) returns (SubmitHistoryResponse);
+  rpc GetNodeHistory(GetNodeHistoryRequest) returns (GetNodeHistoryResponse);
+  // Pod 단위 스냅샷(워크로드 구분). node_name + pod_namespace + pod_name 로 식별.
+  rpc GetPodHistory(GetPodHistoryRequest) returns (GetPodHistoryResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  // Pod 키(ns/name)가 있는 행만 나열 (노드 집계와 분리)
+  rpc ListPods(ListPodsRequest) returns (ListPodsResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Wall-clock time in milliseconds since Unix epoch (UTC).
+// pod_namespace / pod_name 이 비어 있으면 노드 집계 샘플, 있으면 해당 Pod 전용(메트릭 서버 기준 사용률).
+message ResourceSnapshot {
+  int64 timestamp_unix_ms = 1;
+  double cpu_utilization = 2;
+  double memory_utilization = 3;
+  double gpu_utilization = 4;
+  double storage_io_utilization = 5;
+  optional string pod_namespace = 6;
+  optional string pod_name = 7;
+}
+
+message SubmitHistoryRequest {
+  string node_name = 1;
+  repeated ResourceSnapshot snapshots = 2;
+}
+
+message SubmitHistoryResponse {
+  bool accepted = 1;
+  int32 snapshots_processed = 2;
+}
+
+message GetNodeHistoryRequest {
+  string node_name = 1;
+  // If 0, no lower bound on time
+  int64 since_unix_ms = 2;
+  int32 max_snapshots = 3;
+}
+
+message GetNodeHistoryResponse {
+  repeated ResourceSnapshot snapshots = 1;
+}
+
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated string node_names = 1;
+}
+
+message GetPodHistoryRequest {
+  string node_name = 1;
+  string pod_namespace = 2;
+  string pod_name = 3;
+  int64 since_unix_ms = 4;
+  int32 max_snapshots = 5;
+}
+
+message GetPodHistoryResponse {
+  repeated ResourceSnapshot snapshots = 1;
+}
+
+message ListPodsRequest {}
+
+message PodKey {
+  string node_name = 1;
+  string pod_namespace = 2;
+  string pod_name = 3;
+}
+
+message ListPodsResponse {
+  repeated PodKey pods = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+  int64 total_snapshots = 3;
+}

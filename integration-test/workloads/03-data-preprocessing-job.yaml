@@ -1,0 +1,117 @@
+# ============================================
+# Data Preprocessing Job with Insight-Trace Sidecar
+# 데이터 전처리 작업 (I/O 집약적)
+# ============================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-preprocessing-test
+  namespace: ai-workload-test
+  labels:
+    app: data-preprocessing
+    workload-type: preprocessing
+    project: keti-ai-storage
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: data-preprocessing
+        workload-type: preprocessing
+      annotations:
+        insight.keti.re.kr/enabled: "true"
+        insight.keti.re.kr/stage: "preprocessing"
+        insight.keti.re.kr/io-pattern: "write-heavy"
+    spec:
+      schedulerName: ai-storage-scheduler
+
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+      # 프로세스 네임스페이스 공유
+      shareProcessNamespace: true
+
+      containers:
+      # Data Preprocessing Container - 실제 Python 프로세스로 실행
+      - name: preprocessing
+        image: python:3.11-slim
+        command:
+        - python3
+        - -c
+        - |
+          import time
+          import sys
+          import os
+          # 프로세스 이름에 image/vision 키워드 포함
+          sys.argv[0] = 'image_preprocessing_opencv.py'
+          print("=== KETI Data Preprocessing (OpenCV/PIL Image) ===")
+          print("Task: Image dataset preprocessing with torchvision")
+
+          stages = ["data_loading", "augmentation", "normalization", "save"]
+          for stage in stages:
+              print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Stage: {stage}")
+              # I/O 시뮬레이션
+              with open(f'/data/{stage}.bin', 'wb') as f:
+                  f.write(b'0' * (10 * 1024 * 1024))  # 10MB
+              time.sleep(15)
+
+          print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Preprocessing complete!")
+          time.sleep(60)  # 최종 메트릭 리포트 대기
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+
+      # Insight-Trace Sidecar
+      - name: insight-trace
+        image: ketidevit2/insight-trace:latest
+        imagePullPolicy: Always
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: APOLLO_ENDPOINT
+          value: "apollo-policy-server.keti.svc.cluster.local:50051"
+        - name: SIDECAR_PORT
+          value: "9090"
+        - name: METRICS_INTERVAL
+          value: "3s"
+        - name: ANALYSIS_INTERVAL
+          value: "5s"
+        - name: REPORT_INTERVAL
+          value: "15s"
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+          readOnly: true
+
+      volumes:
+      - name: data-volume
+        emptyDir:
+          sizeLimit: 500Mi
+
+      restartPolicy: Never

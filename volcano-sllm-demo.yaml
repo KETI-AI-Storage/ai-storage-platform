@@ -1,0 +1,58 @@
+# Volcano Job: small LLM (SmolLM 135M) CPU inference via Ollama
+# Purpose: exercise volcano scheduling so the Grafana "Volcano Scheduler" dashboard populates.
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: sllm-smollm-demo
+  namespace: default
+  labels:
+    app: sllm-demo
+spec:
+  schedulerName: volcano
+  queue: default
+  minAvailable: 1
+  policies:
+    - event: PodEvicted
+      action: RestartJob
+  tasks:
+    - replicas: 1
+      name: inference
+      template:
+        metadata:
+          labels:
+            app: sllm-demo
+        spec:
+          schedulerName: volcano
+          restartPolicy: Never
+          # pin to the live master node (worker-01 is down); do NOT broadly tolerate
+          # the unreachable taint or volcano may place the pod on the dead node.
+          nodeSelector:
+            kubernetes.io/hostname: ai-storage-master
+          containers:
+            - name: ollama
+              image: ollama/ollama:latest
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "[1/4] starting ollama server..."
+                  ollama serve &
+                  for i in $(seq 1 30); do
+                    ollama list >/dev/null 2>&1 && break
+                    sleep 2
+                  done
+                  echo "[2/4] pulling SmolLM 135M (fallback: qwen2.5:0.5b)..."
+                  MODEL=smollm:135m
+                  ollama pull "$MODEL" || { MODEL=qwen2.5:0.5b; ollama pull "$MODEL"; }
+                  echo "[3/4] running inference with $MODEL ..."
+                  ollama run "$MODEL" "In two sentences, explain what Kubernetes is."
+                  echo "[4/4] inference done. holding 240s for dashboard observation."
+                  sleep 240
+                  echo "exiting."
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: "2Gi"
+                limits:
+                  cpu: "4"
+                  memory: "4Gi"

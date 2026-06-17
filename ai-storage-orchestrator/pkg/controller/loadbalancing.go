@@ -1,0 +1,1097 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"math"
+	"sort"
+	"sync"
+	"time"
+
+	"ai-storage-orchestrator/pkg/types"
+
+	"github.com/google/uuid"
+)
+
+// LoadbalancingController manages loadbalancing operations
+type LoadbalancingController struct {
+	k8sClient          K8sClientInterface
+	migrationController *MigrationController
+	jobs               map[string]*LoadbalancingJob
+	jobsMux            sync.RWMutex
+	metrics            *types.LoadbalancingMetrics
+}
+
+// LoadbalancingJob represents an active loadbalancing job
+type LoadbalancingJob struct {
+	ID          string
+	Request     *types.LoadbalancingRequest
+	Status      types.LoadbalancingStatus
+	Details     *types.LoadbalancingDetails
+	CreatedAt   time.Time
+	ctx         context.Context
+	cancel      context.CancelFunc
+}
+
+// NewLoadbalancingController creates a new loadbalancing controller.
+func NewLoadbalancingController(k8sClient K8sClientInterface, migrationController *MigrationController) *LoadbalancingController {
+	return &LoadbalancingController{
+		k8sClient:          k8sClient,
+		migrationController: migrationController,
+		jobs:               make(map[string]*LoadbalancingJob),
+		metrics: &types.LoadbalancingMetrics{
+			TotalLoadbalancingJobs:  0,
+			ActiveLoadbalancingJobs: 0,
+		},
+	}
+}
+
+// StartLoadbalancing initiates a new loadbalancing job
+func (lc *LoadbalancingController) StartLoadbalancing(req *types.LoadbalancingRequest) (string, error) {
+	// Validate request
+	if err := lc.validateRequest(req); err != nil {
+		return "", fmt.Errorf("invalid request: %w", err)
+	}
+
+	// Create loadbalancing job
+	jobID := fmt.Sprintf("lb-%s", uuid.New().String()[:8])
+	ctx, cancel := context.WithCancel(context.Background())
+
+	job := &LoadbalancingJob{
+		ID:      jobID,
+		Request: req,
+		Status:  types.LoadbalancingStatusPending,
+		Details: &types.LoadbalancingDetails{
+			CreatedAt:         time.Now(),
+			PlannedMigrations: make([]types.MigrationPlan, 0),
+			ExecutedMigrations: make([]types.MigrationResult, 0),
+		},
+		CreatedAt: time.Now(),
+		ctx:       ctx,
+		cancel:    cancel,
+	}
+
+	// Store job
+	lc.jobsMux.Lock()
+	lc.jobs[jobID] = job
+	lc.metrics.TotalLoadbalancingJobs++
+	lc.metrics.ActiveLoadbalancingJobs++
+	lc.jobsMux.Unlock()
+
+	// Start loadbalancing goroutine
+	go lc.runLoadbalancing(job)
+
+	log.Printf("Loadbalancing job %s started with strategy %s", jobID, req.Strategy)
+	return jobID, nil
+}
+
+// validateRequest validates the loadbalancing request
+func (lc *LoadbalancingController) validateRequest(req *types.LoadbalancingRequest) error {
+	if req.Strategy == "" {
+		req.Strategy = string(types.StrategyLoadSpreading)
+	}
+
+	// Validate strategy
+	validStrategies := []string{
+		string(types.StrategyLeastLoaded),
+		string(types.StrategyLoadSpreading),
+		string(types.StrategyStorageAware),
+		string(types.StrategyWeighted),
+		string(types.LBStrategyStorageIOBalanced),
+		string(types.LBStrategyStorageAwareWeighted),
+		// WHY: 노드별 Pod 개수 편차로 imbalance 를 판정하는 demo-friendly strategy.
+		string(types.StrategyPodCount),
+	}
+	isValid := false
+	for _, s := range validStrategies {
+		if req.Strategy == s {
+			isValid = true
+			break
+		}
+	}
+	if !isValid {
+		return fmt.Errorf("invalid strategy: %s", req.Strategy)
+	}
+
+	// Set default thresholds
+	if req.CPUThreshold == 0 {
+		req.CPUThreshold = 80
+	}
+	if req.MemoryThreshold == 0 {
+		req.MemoryThreshold = 80
+	}
+	if req.GPUThreshold == 0 {
+		req.GPUThreshold = 80
+	}
+	if req.MaxMigrationsPerCycle == 0 {
+		req.MaxMigrationsPerCycle = 5
+	}
+
+	// Set default Storage I/O thresholds for AI/ML workloads
+	if req.StorageReadThreshold == 0 {
+		req.StorageReadThreshold = 500 // 500 MB/s
+	}
+	if req.StorageWriteThreshold == 0 {
+		req.StorageWriteThreshold = 200 // 200 MB/s
+	}
+	if req.StorageIOPSThreshold == 0 {
+		req.StorageIOPSThreshold = 5000 // 5000 IOPS
+	}
+
+	return nil
+}
+
+// runLoadbalancing executes the loadbalancing workflow
+func (lc *LoadbalancingController) runLoadbalancing(job *LoadbalancingJob) {
+	defer func() {
+		lc.jobsMux.Lock()
+		lc.metrics.ActiveLoadbalancingJobs--
+		now := time.Now()
+		lc.metrics.LastLoadbalancingTime = &now
+		lc.jobsMux.Unlock()
+	}()
+
+	// One-time execution (interval == 0)
+	if job.Request.Interval == 0 {
+		if err := lc.executeCycle(job); err != nil {
+			log.Printf("Loadbalancing job %s failed: %v", job.ID, err)
+			lc.jobsMux.Lock()
+			job.Status = types.LoadbalancingStatusFailed
+			job.Details.ErrorMessage = err.Error()
+			completedAt := time.Now()
+			job.Details.CompletedAt = &completedAt
+			lc.jobsMux.Unlock()
+			return
+		}
+		lc.jobsMux.Lock()
+		job.Status = types.LoadbalancingStatusCompleted
+		completedAt := time.Now()
+		job.Details.CompletedAt = &completedAt
+		lc.jobsMux.Unlock()
+		log.Printf("Loadbalancing job %s completed", job.ID)
+		return
+	}
+
+	// Periodic execution (interval > 0)
+	ticker := time.NewTicker(time.Duration(job.Request.Interval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		if err := lc.executeCycle(job); err != nil {
+			log.Printf("Loadbalancing job %s failed: %v", job.ID, err)
+			lc.jobsMux.Lock()
+			job.Status = types.LoadbalancingStatusFailed
+			job.Details.ErrorMessage = err.Error()
+			completedAt := time.Now()
+			job.Details.CompletedAt = &completedAt
+			lc.jobsMux.Unlock()
+			return
+		}
+
+		select {
+		case <-job.ctx.Done():
+			lc.jobsMux.Lock()
+			job.Status = types.LoadbalancingStatusCancelled
+			completedAt := time.Now()
+			job.Details.CompletedAt = &completedAt
+			lc.jobsMux.Unlock()
+			log.Printf("Loadbalancing job %s cancelled", job.ID)
+			return
+		case <-ticker.C:
+			// Continue to next cycle
+		}
+	}
+}
+
+// executeCycle executes one cycle of loadbalancing
+func (lc *LoadbalancingController) executeCycle(job *LoadbalancingJob) error {
+	// Phase 1: Analyze cluster state
+	lc.jobsMux.Lock()
+	job.Status = types.LoadbalancingStatusAnalyzing
+	lc.jobsMux.Unlock()
+
+	clusterState, err := lc.analyzeClusterState(job)
+	if err != nil {
+		return fmt.Errorf("failed to analyze cluster state: %w", err)
+	}
+
+	lc.jobsMux.Lock()
+	job.Details.InitialState = *clusterState
+	lc.jobsMux.Unlock()
+
+	// Phase 2: Calculate migration plan
+	migrationPlan, err := lc.calculateMigrationPlan(job, clusterState)
+	if err != nil {
+		return fmt.Errorf("failed to calculate migration plan: %w", err)
+	}
+
+	lc.jobsMux.Lock()
+	job.Details.PlannedMigrations = migrationPlan
+	job.Details.PodsToMigrate = int32(len(migrationPlan))
+	lc.jobsMux.Unlock()
+
+	// If no migrations needed, return success
+	if len(migrationPlan) == 0 {
+		log.Printf("Loadbalancing job %s: Cluster is already balanced", job.ID)
+		return nil
+	}
+
+	// Phase 3: Execute migrations
+	lc.jobsMux.Lock()
+	job.Status = types.LoadbalancingStatusExecuting
+	lc.jobsMux.Unlock()
+
+	if err := lc.executeMigrations(job, migrationPlan); err != nil {
+		return fmt.Errorf("failed to execute migrations: %w", err)
+	}
+
+	// Phase 4: Verify improvement
+	finalState, err := lc.analyzeClusterState(job)
+	if err != nil {
+		log.Printf("Warning: Failed to analyze final cluster state: %v", err)
+	} else {
+		improvement := lc.calculateImprovement(&job.Details.InitialState, finalState)
+		lc.jobsMux.Lock()
+		job.Details.ResourceImprovement = improvement
+		lc.metrics.AverageBalanceScore = finalState.BalanceScore
+		lc.jobsMux.Unlock()
+	}
+
+	return nil
+}
+
+// analyzeClusterState analyzes the current resource utilization of the cluster
+func (lc *LoadbalancingController) analyzeClusterState(job *LoadbalancingJob) (*types.ClusterState, error) {
+	ctx := context.Background()
+
+	// Get all nodes in cluster
+	nodes, err := lc.k8sClient.ListNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	clusterState := &types.ClusterState{
+		Timestamp: time.Now(),
+		Nodes:     make([]types.NodeState, 0),
+	}
+
+	// Filter nodes based on request
+	targetNodesMap := make(map[string]bool)
+	if len(job.Request.TargetNodes) > 0 {
+		for _, nodeName := range job.Request.TargetNodes {
+			targetNodesMap[nodeName] = true
+		}
+	}
+
+	// Analyze each node
+	for _, node := range nodes {
+		// Skip if not in target nodes
+		if len(targetNodesMap) > 0 && !targetNodesMap[node] {
+			continue
+		}
+
+		nodeState, err := lc.getNodeState(ctx, node)
+		if err != nil {
+			log.Printf("Warning: Failed to get state for node %s: %v", node, err)
+			continue
+		}
+
+		clusterState.Nodes = append(clusterState.Nodes, *nodeState)
+		clusterState.TotalPods += nodeState.PodCount
+	}
+
+	// Calculate balance score
+	clusterState.BalanceScore = lc.calculateBalanceScore(clusterState)
+
+	return clusterState, nil
+}
+
+// getNodeState gets the resource state of a single node
+func (lc *LoadbalancingController) getNodeState(ctx context.Context, nodeName string) (*types.NodeState, error) {
+	// Get node metrics
+	cpuPercent, memoryPercent, err := lc.k8sClient.GetNodeMetrics(ctx, nodeName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node metrics: %w", err)
+	}
+
+	// Get node capacity
+	cpuCapacity, memoryCapacity, gpuCapacity, err := lc.k8sClient.GetNodeCapacity(ctx, nodeName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node capacity: %w", err)
+	}
+
+	// Get pod count on node
+	podCount, err := lc.k8sClient.GetNodePodCount(ctx, nodeName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pod count: %w", err)
+	}
+
+	// Get node layer label
+	layer, err := lc.k8sClient.GetNodeLabel(ctx, nodeName, "layer")
+	if err != nil {
+		layer = ""
+	}
+
+	// Get GPU utilization for node
+	gpuPercent := int32(0)
+	if gpuCapacity > 0 {
+		gpuUtil, err := lc.k8sClient.GetNodeGPUUtilization(ctx, nodeName)
+		if err == nil {
+			gpuPercent = gpuUtil
+		}
+	}
+
+	// Get Storage I/O metrics for AI/ML workloads
+	storageReadMBps := int64(0)
+	storageWriteMBps := int64(0)
+	storageIOPS := int64(0)
+	storageUtilization := int32(0)
+	readMBps, writeMBps, iops, util, err := lc.k8sClient.GetNodeStorageMetrics(ctx, nodeName)
+	if err == nil {
+		storageReadMBps = readMBps
+		storageWriteMBps = writeMBps
+		storageIOPS = iops
+		storageUtilization = util
+	}
+
+	return &types.NodeState{
+		NodeName:           nodeName,
+		CPUPercent:         cpuPercent,
+		MemoryPercent:      memoryPercent,
+		GPUPercent:         gpuPercent,
+		PodCount:           podCount,
+		CPUCapacity:        cpuCapacity,
+		MemoryCapacity:     memoryCapacity,
+		GPUCapacity:        gpuCapacity,
+		Layer:              layer,
+		StorageReadMBps:    storageReadMBps,
+		StorageWriteMBps:   storageWriteMBps,
+		StorageIOPS:        storageIOPS,
+		StorageUtilization: storageUtilization,
+	}, nil
+}
+
+// calculateBalanceScore calculates a balance score (0-100) for the cluster
+// Higher score means more balanced
+func (lc *LoadbalancingController) calculateBalanceScore(state *types.ClusterState) float64 {
+	if len(state.Nodes) == 0 {
+		return 100.0
+	}
+
+	// Calculate coefficient of variation for each resource
+	cpuCV := lc.calculateCoefficientOfVariation(state.Nodes, "cpu")
+	memCV := lc.calculateCoefficientOfVariation(state.Nodes, "memory")
+	gpuCV := lc.calculateCoefficientOfVariation(state.Nodes, "gpu")
+	podCV := lc.calculateCoefficientOfVariation(state.Nodes, "pod")
+
+	// Calculate Storage I/O coefficient of variation for AI/ML workloads
+	storageReadCV := lc.calculateCoefficientOfVariation(state.Nodes, "storage_read")
+	storageWriteCV := lc.calculateCoefficientOfVariation(state.Nodes, "storage_write")
+	storageIOPSCV := lc.calculateCoefficientOfVariation(state.Nodes, "storage_iops")
+	storageCV := (storageReadCV + storageWriteCV + storageIOPSCV) / 3.0
+
+	// Lower CV means more balanced, convert to 0-100 score
+	// CV of 0 = 100 score, CV of 1 = 0 score
+	// Weight: CPU (20%), Memory (20%), GPU (15%), Pod (15%), Storage I/O (30%)
+	avgCV := 0.20*cpuCV + 0.20*memCV + 0.15*gpuCV + 0.15*podCV + 0.30*storageCV
+	score := math.Max(0, 100.0*(1.0-avgCV))
+
+	return score
+}
+
+// calculateCoefficientOfVariation calculates the coefficient of variation for a resource
+func (lc *LoadbalancingController) calculateCoefficientOfVariation(nodes []types.NodeState, resourceType string) float64 {
+	if len(nodes) == 0 {
+		return 0.0
+	}
+
+	values := make([]float64, 0, len(nodes))
+	for _, node := range nodes {
+		var val float64
+		switch resourceType {
+		case "cpu":
+			val = float64(node.CPUPercent)
+		case "memory":
+			val = float64(node.MemoryPercent)
+		case "gpu":
+			val = float64(node.GPUPercent)
+		case "pod":
+			val = float64(node.PodCount)
+		case "storage_read":
+			val = float64(node.StorageReadMBps)
+		case "storage_write":
+			val = float64(node.StorageWriteMBps)
+		case "storage_iops":
+			val = float64(node.StorageIOPS)
+		case "storage_util":
+			val = float64(node.StorageUtilization)
+		}
+		values = append(values, val)
+	}
+
+	// Calculate mean
+	sum := 0.0
+	for _, v := range values {
+		sum += v
+	}
+	mean := sum / float64(len(values))
+
+	if mean == 0 {
+		return 0.0
+	}
+
+	// Calculate standard deviation
+	variance := 0.0
+	for _, v := range values {
+		diff := v - mean
+		variance += diff * diff
+	}
+	variance /= float64(len(values))
+	stdDev := math.Sqrt(variance)
+
+	// Coefficient of variation = stdDev / mean
+	return stdDev / mean
+}
+
+// calculateMigrationPlan calculates which pods should be migrated to which nodes
+func (lc *LoadbalancingController) calculateMigrationPlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	strategy := types.LoadbalancingStrategy(job.Request.Strategy)
+
+	switch strategy {
+	case types.StrategyLeastLoaded:
+		return lc.calculateLeastLoadedPlan(job, state)
+	case types.StrategyLoadSpreading:
+		return lc.calculateLoadSpreadingPlan(job, state)
+	case types.StrategyStorageAware:
+		return lc.calculateStorageAwarePlan(job, state)
+	case types.StrategyWeighted:
+		return lc.calculateWeightedPlan(job, state)
+	case types.LBStrategyStorageIOBalanced:
+		return lc.calculateStorageIOBalancedPlan(job, state)
+	case types.LBStrategyStorageAwareWeighted:
+		return lc.calculateStorageAwareWeightedPlan(job, state)
+	case types.StrategyPodCount:
+		return lc.calculatePodCountPlan(job, state)
+	default:
+		return nil, fmt.Errorf("unsupported strategy: %s", strategy)
+	}
+}
+
+// calculatePodCountPlan 는 노드별 Pod 개수 편차만으로 migration plan 을 생성한다.
+//
+// WHY: 데모 환경처럼 노드 CPU/Memory 사용률이 모두 낮은 경우 기존 strategy 들은 모두
+//
+//	"Cluster is already balanced" 로 판정해 migration 이 발생하지 않는다. Pod 개수
+//	편차를 직접 본다.
+//
+// 동작:
+//
+//  1. job.Request.Namespace 가 비어 있지 않으면 해당 namespace 의 Pod 만, 비어 있으면
+//     모든 Pod 을 노드별로 카운트한다.
+//  2. 평균 대비 +1 초과 노드(source) 와 평균 미만 노드(target) 를 추려 source 의 Pod 을
+//     target 으로 옮기는 plan 을 만든다.
+//  3. MaxMigrationsPerCycle 으로 상한을 둔다(없으면 1).
+func (lc *LoadbalancingController) calculatePodCountPlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	ctx := context.Background()
+	plan := make([]types.MigrationPlan, 0)
+
+	if len(state.Nodes) < 2 {
+		return plan, nil
+	}
+
+	type nodeCount struct {
+		Name  string
+		Count int32
+	}
+	per := make([]nodeCount, 0, len(state.Nodes))
+	totalCount := int32(0)
+	for _, n := range state.Nodes {
+		// Pod 카운트는 namespace 필터를 반영해 다시 계산한다.
+		pods, err := lc.k8sClient.ListPodsOnNode(ctx, n.NodeName)
+		if err != nil {
+			log.Printf("[pod_count] WARN list pods failed for node %s: %v", n.NodeName, err)
+			continue
+		}
+		cnt := int32(0)
+		for _, p := range pods {
+			if job.Request.Namespace != "" && p.Namespace != job.Request.Namespace {
+				continue
+			}
+			cnt++
+		}
+		per = append(per, nodeCount{Name: n.NodeName, Count: cnt})
+		totalCount += cnt
+	}
+
+	if len(per) < 2 || totalCount == 0 {
+		return plan, nil
+	}
+	mean := float64(totalCount) / float64(len(per))
+
+	// 정렬: source 후보(많은 순), target 후보(적은 순)
+	sort.Slice(per, func(i, j int) bool { return per[i].Count > per[j].Count })
+
+	// imbalance 임계 = max(1, ceil(mean*0.5)). namespace 가 비어 있는 cluster-wide
+	// 모드는 자연 편차가 크므로 임계를 ceil(mean*0.5) 로 두고, namespace 한정 모드는
+	// 작은 차이도 잡도록 1 로 한다.
+	threshold := int32(1)
+	if job.Request.Namespace == "" {
+		// cluster-wide: 50% 편차 이상만 imbalance 로 본다.
+		t := int32(math.Ceil(mean * 0.5))
+		if t > threshold {
+			threshold = t
+		}
+	}
+
+	maxMig := job.Request.MaxMigrationsPerCycle
+	if maxMig <= 0 {
+		maxMig = 1
+	}
+
+	// target 후보는 적은 쪽부터
+	targets := make([]nodeCount, len(per))
+	copy(targets, per)
+	sort.Slice(targets, func(i, j int) bool { return targets[i].Count < targets[j].Count })
+
+	migCount := int32(0)
+	for _, src := range per {
+		if migCount >= maxMig {
+			break
+		}
+		// imbalance 임계 미달 source 는 skip
+		if float64(src.Count) <= mean+float64(threshold-1) {
+			continue
+		}
+
+		// 적합한 target 선정: src 와 다른 노드 중 가장 Pod 적은 노드
+		var tgt string
+		for _, t := range targets {
+			if t.Name == src.Name {
+				continue
+			}
+			tgt = t.Name
+			break
+		}
+		if tgt == "" {
+			continue
+		}
+
+		// 실제 옮길 Pod 선정: src 노드의 namespace-매칭 Pod 중 하나
+		pods, err := lc.k8sClient.ListPodsOnNode(ctx, src.Name)
+		if err != nil {
+			continue
+		}
+		var pickedPod *types.PodRef
+		for i := range pods {
+			p := pods[i]
+			if job.Request.Namespace != "" && p.Namespace != job.Request.Namespace {
+				continue
+			}
+			// system/control 컴포넌트는 회피한다.
+			if p.Namespace == "kube-system" || p.Namespace == "apollo" {
+				continue
+			}
+			pickedPod = &p
+			break
+		}
+		if pickedPod == nil {
+			continue
+		}
+
+		plan = append(plan, types.MigrationPlan{
+			PodName:      pickedPod.Name,
+			PodNamespace: pickedPod.Namespace,
+			SourceNode:   src.Name,
+			TargetNode:   tgt,
+			Reason: fmt.Sprintf("pod_count imbalance: source=%s has %d pods, target=%s has fewest, mean=%.1f, threshold=%d",
+				src.Name, src.Count, tgt, mean, threshold),
+			Priority: int32(100 - migCount),
+		})
+		migCount++
+	}
+
+	return plan, nil
+}
+
+// calculateLoadSpreadingPlan calculates a plan to spread load evenly across nodes
+func (lc *LoadbalancingController) calculateLoadSpreadingPlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	ctx := context.Background()
+	plan := make([]types.MigrationPlan, 0)
+
+	// Sort nodes by load (highest first)
+	sortedNodes := make([]types.NodeState, len(state.Nodes))
+	copy(sortedNodes, state.Nodes)
+	sort.Slice(sortedNodes, func(i, j int) bool {
+		loadI := float64(sortedNodes[i].CPUPercent+sortedNodes[i].MemoryPercent) / 2.0
+		loadJ := float64(sortedNodes[j].CPUPercent+sortedNodes[j].MemoryPercent) / 2.0
+		return loadI > loadJ
+	})
+
+	// Identify overloaded nodes
+	overloadedNodes := make([]types.NodeState, 0)
+	underloadedNodes := make([]types.NodeState, 0)
+
+	for _, node := range sortedNodes {
+		avgLoad := float64(node.CPUPercent+node.MemoryPercent) / 2.0
+		if avgLoad > float64(job.Request.CPUThreshold) {
+			overloadedNodes = append(overloadedNodes, node)
+		} else if avgLoad < 50.0 { // Nodes below 50% are considered underloaded
+			underloadedNodes = append(underloadedNodes, node)
+		}
+	}
+
+	// If no overloaded nodes or no underloaded nodes, no migration needed
+	if len(overloadedNodes) == 0 || len(underloadedNodes) == 0 {
+		return plan, nil
+	}
+
+	// For each overloaded node, find pods to migrate
+	migrationsCount := 0
+	for _, sourceNode := range overloadedNodes {
+		if migrationsCount >= int(job.Request.MaxMigrationsPerCycle) {
+			break
+		}
+
+		// Get pods on this node
+		pods, err := lc.k8sClient.ListPodsOnNode(ctx, sourceNode.NodeName)
+		if err != nil {
+			log.Printf("Warning: Failed to list pods on node %s: %v", sourceNode.NodeName, err)
+			continue
+		}
+
+		// Filter pods based on namespace (if specified)
+		filteredPods := make([]types.PodRef, 0)
+		for _, pod := range pods {
+			if job.Request.Namespace == "" || pod.Namespace == job.Request.Namespace {
+				filteredPods = append(filteredPods, pod)
+			}
+		}
+
+		// Try to migrate some pods
+		for _, pod := range filteredPods {
+			if migrationsCount >= int(job.Request.MaxMigrationsPerCycle) {
+				break
+			}
+
+			// Find best target node (least loaded)
+			targetNode := underloadedNodes[0].NodeName
+
+			plan = append(plan, types.MigrationPlan{
+				PodName:      pod.Name,
+				PodNamespace: pod.Namespace,
+				SourceNode:   sourceNode.NodeName,
+				TargetNode:   targetNode,
+				Reason:       fmt.Sprintf("Source node overloaded (%.1f%%), target node underloaded", float64(sourceNode.CPUPercent+sourceNode.MemoryPercent)/2.0),
+				Priority:     int32(100 - migrationsCount),
+			})
+
+			migrationsCount++
+		}
+	}
+
+	return plan, nil
+}
+
+// calculateLeastLoadedPlan moves pods to least loaded nodes
+func (lc *LoadbalancingController) calculateLeastLoadedPlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	// Similar to load spreading but always targets the absolute least loaded node
+	return lc.calculateLoadSpreadingPlan(job, state)
+}
+
+// calculateStorageAwarePlan prioritizes storage layer nodes
+func (lc *LoadbalancingController) calculateStorageAwarePlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	// Filter for storage layer nodes
+	storageNodes := make([]types.NodeState, 0)
+	for _, node := range state.Nodes {
+		if node.Layer == "storage" {
+			storageNodes = append(storageNodes, node)
+		}
+	}
+
+	if len(storageNodes) == 0 {
+		log.Printf("Warning: No storage layer nodes found, falling back to load spreading")
+		return lc.calculateLoadSpreadingPlan(job, state)
+	}
+
+	// Use load spreading on storage nodes only
+	storageState := &types.ClusterState{
+		Timestamp: state.Timestamp,
+		Nodes:     storageNodes,
+		TotalPods: 0,
+	}
+	for _, node := range storageNodes {
+		storageState.TotalPods += node.PodCount
+	}
+
+	return lc.calculateLoadSpreadingPlan(job, storageState)
+}
+
+// calculateWeightedPlan uses weighted combination of all resources
+func (lc *LoadbalancingController) calculateWeightedPlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	// TODO: Implement weighted strategy
+	// For now, fall back to load spreading
+	return lc.calculateLoadSpreadingPlan(job, state)
+}
+
+// calculateStorageIOBalancedPlan balances nodes based on Storage I/O metrics
+// This strategy is designed for AI/ML workloads with heavy data loading requirements
+func (lc *LoadbalancingController) calculateStorageIOBalancedPlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	ctx := context.Background()
+	plan := make([]types.MigrationPlan, 0)
+
+	// Sort nodes by total Storage I/O (highest first)
+	sortedNodes := make([]types.NodeState, len(state.Nodes))
+	copy(sortedNodes, state.Nodes)
+	sort.Slice(sortedNodes, func(i, j int) bool {
+		ioI := sortedNodes[i].StorageReadMBps + sortedNodes[i].StorageWriteMBps
+		ioJ := sortedNodes[j].StorageReadMBps + sortedNodes[j].StorageWriteMBps
+		return ioI > ioJ
+	})
+
+	// Identify nodes with high and low Storage I/O
+	highIONodes := make([]types.NodeState, 0)
+	lowIONodes := make([]types.NodeState, 0)
+
+	for _, node := range sortedNodes {
+		totalIO := node.StorageReadMBps + node.StorageWriteMBps
+		if node.StorageReadMBps > job.Request.StorageReadThreshold ||
+			node.StorageWriteMBps > job.Request.StorageWriteThreshold ||
+			node.StorageIOPS > job.Request.StorageIOPSThreshold {
+			highIONodes = append(highIONodes, node)
+		} else if totalIO < (job.Request.StorageReadThreshold+job.Request.StorageWriteThreshold)/2 {
+			lowIONodes = append(lowIONodes, node)
+		}
+	}
+
+	if len(highIONodes) == 0 || len(lowIONodes) == 0 {
+		log.Printf("Loadbalancing: Storage I/O is already balanced")
+		return plan, nil
+	}
+
+	// Migrate pods from high I/O nodes to low I/O nodes
+	migrationsCount := 0
+	for _, sourceNode := range highIONodes {
+		if migrationsCount >= int(job.Request.MaxMigrationsPerCycle) {
+			break
+		}
+
+		pods, err := lc.k8sClient.ListPodsOnNode(ctx, sourceNode.NodeName)
+		if err != nil {
+			log.Printf("Warning: Failed to list pods on node %s: %v", sourceNode.NodeName, err)
+			continue
+		}
+
+		for _, pod := range pods {
+			if migrationsCount >= int(job.Request.MaxMigrationsPerCycle) {
+				break
+			}
+
+			// Skip if namespace filter specified and doesn't match
+			if job.Request.Namespace != "" && pod.Namespace != job.Request.Namespace {
+				continue
+			}
+
+			// Find target node with lowest I/O
+			targetNode := lowIONodes[0].NodeName
+
+			plan = append(plan, types.MigrationPlan{
+				PodName:      pod.Name,
+				PodNamespace: pod.Namespace,
+				SourceNode:   sourceNode.NodeName,
+				TargetNode:   targetNode,
+				Reason: fmt.Sprintf("High Storage I/O on source (Read: %dMB/s, Write: %dMB/s, IOPS: %d)",
+					sourceNode.StorageReadMBps, sourceNode.StorageWriteMBps, sourceNode.StorageIOPS),
+				Priority: int32(100 - migrationsCount),
+			})
+
+			migrationsCount++
+		}
+	}
+
+	return plan, nil
+}
+
+// calculateStorageAwareWeightedPlan combines compute and storage I/O metrics
+// Uses weighted scoring: CPU (25%), Memory (25%), GPU (20%), Storage I/O (30%)
+func (lc *LoadbalancingController) calculateStorageAwareWeightedPlan(job *LoadbalancingJob, state *types.ClusterState) ([]types.MigrationPlan, error) {
+	ctx := context.Background()
+	plan := make([]types.MigrationPlan, 0)
+
+	// Calculate weighted load score for each node
+	type nodeScore struct {
+		node  types.NodeState
+		score float64
+	}
+	scoredNodes := make([]nodeScore, 0, len(state.Nodes))
+
+	for _, node := range state.Nodes {
+		// Normalize metrics (0-1 scale)
+		cpuNorm := float64(node.CPUPercent) / 100.0
+		memNorm := float64(node.MemoryPercent) / 100.0
+		gpuNorm := float64(node.GPUPercent) / 100.0
+
+		// Normalize Storage I/O based on thresholds
+		readNorm := float64(node.StorageReadMBps) / float64(job.Request.StorageReadThreshold)
+		writeNorm := float64(node.StorageWriteMBps) / float64(job.Request.StorageWriteThreshold)
+		iopsNorm := float64(node.StorageIOPS) / float64(job.Request.StorageIOPSThreshold)
+		storageNorm := (readNorm + writeNorm + iopsNorm) / 3.0
+
+		// Weighted score: CPU (25%), Memory (25%), GPU (20%), Storage I/O (30%)
+		score := 0.25*cpuNorm + 0.25*memNorm + 0.20*gpuNorm + 0.30*storageNorm
+
+		scoredNodes = append(scoredNodes, nodeScore{node: node, score: score})
+	}
+
+	// Sort by score (highest first = most loaded)
+	sort.Slice(scoredNodes, func(i, j int) bool {
+		return scoredNodes[i].score > scoredNodes[j].score
+	})
+
+	// Identify overloaded and underloaded nodes (threshold: score > 0.8 or < 0.4)
+	overloadedNodes := make([]nodeScore, 0)
+	underloadedNodes := make([]nodeScore, 0)
+
+	for _, ns := range scoredNodes {
+		if ns.score > 0.8 {
+			overloadedNodes = append(overloadedNodes, ns)
+		} else if ns.score < 0.4 {
+			underloadedNodes = append(underloadedNodes, ns)
+		}
+	}
+
+	if len(overloadedNodes) == 0 || len(underloadedNodes) == 0 {
+		log.Printf("Loadbalancing: Cluster is balanced (weighted score)")
+		return plan, nil
+	}
+
+	// Migrate pods from overloaded to underloaded nodes
+	migrationsCount := 0
+	for _, source := range overloadedNodes {
+		if migrationsCount >= int(job.Request.MaxMigrationsPerCycle) {
+			break
+		}
+
+		pods, err := lc.k8sClient.ListPodsOnNode(ctx, source.node.NodeName)
+		if err != nil {
+			log.Printf("Warning: Failed to list pods on node %s: %v", source.node.NodeName, err)
+			continue
+		}
+
+		for _, pod := range pods {
+			if migrationsCount >= int(job.Request.MaxMigrationsPerCycle) {
+				break
+			}
+
+			// Skip if namespace filter specified and doesn't match
+			if job.Request.Namespace != "" && pod.Namespace != job.Request.Namespace {
+				continue
+			}
+
+			// Target: lowest scored node
+			target := underloadedNodes[0]
+
+			plan = append(plan, types.MigrationPlan{
+				PodName:      pod.Name,
+				PodNamespace: pod.Namespace,
+				SourceNode:   source.node.NodeName,
+				TargetNode:   target.node.NodeName,
+				Reason: fmt.Sprintf("Weighted score %.2f > 0.8 (CPU: %d%%, Mem: %d%%, GPU: %d%%, Storage I/O: %dMB/s)",
+					source.score, source.node.CPUPercent, source.node.MemoryPercent,
+					source.node.GPUPercent, source.node.StorageReadMBps+source.node.StorageWriteMBps),
+				Priority:             int32(100 - migrationsCount),
+				EstimatedImprovement: source.score - target.score,
+			})
+
+			migrationsCount++
+		}
+	}
+
+	return plan, nil
+}
+
+// executeMigrations executes the migration plan
+func (lc *LoadbalancingController) executeMigrations(job *LoadbalancingJob, plan []types.MigrationPlan) error {
+	results := make([]types.MigrationResult, 0)
+
+	// Sort plan by priority
+	sort.Slice(plan, func(i, j int) bool {
+		return plan[i].Priority > plan[j].Priority
+	})
+
+	// Execute migrations
+	for _, migration := range plan {
+		startTime := time.Now()
+
+		// Create migration request
+		migReq := &types.MigrationRequest{
+			PodName:      migration.PodName,
+			PodNamespace: migration.PodNamespace,
+			SourceNode:   migration.SourceNode,
+			TargetNode:   migration.TargetNode,
+			PreservePV:   job.Request.PreservePV,
+			Timeout:      600, // 10 minutes
+		}
+
+		// Execute migration via migration controller
+		migrationResp, err := lc.migrationController.StartMigration(migReq)
+
+		endTime := time.Now()
+		duration := endTime.Sub(startTime).Seconds()
+
+		migrationID := ""
+		if migrationResp != nil {
+			migrationID = migrationResp.MigrationID
+		}
+
+		result := types.MigrationResult{
+			MigrationID:  migrationID,
+			PodName:      migration.PodName,
+			PodNamespace: migration.PodNamespace,
+			SourceNode:   migration.SourceNode,
+			TargetNode:   migration.TargetNode,
+			StartTime:    startTime,
+			EndTime:      endTime,
+			Duration:     duration,
+		}
+
+		if err != nil {
+			result.Status = "failed"
+			result.ErrorMessage = err.Error()
+			log.Printf("Migration failed: %s/%s from %s to %s: %v",
+				migration.PodNamespace, migration.PodName,
+				migration.SourceNode, migration.TargetNode, err)
+
+			lc.jobsMux.Lock()
+			job.Details.FailedMigrations++
+			lc.metrics.FailedMigrations++
+			lc.jobsMux.Unlock()
+		} else {
+			result.Status = "success"
+			log.Printf("Migration succeeded: %s/%s from %s to %s",
+				migration.PodNamespace, migration.PodName,
+				migration.SourceNode, migration.TargetNode)
+
+			lc.jobsMux.Lock()
+			job.Details.SuccessfulMigrations++
+			lc.metrics.SuccessfulMigrations++
+			lc.metrics.TotalMigrationsExecuted++
+			lc.jobsMux.Unlock()
+		}
+
+		results = append(results, result)
+	}
+
+	lc.jobsMux.Lock()
+	job.Details.ExecutedMigrations = results
+	lc.jobsMux.Unlock()
+
+	return nil
+}
+
+// calculateImprovement calculates the improvement in resource utilization
+func (lc *LoadbalancingController) calculateImprovement(before, after *types.ClusterState) *types.ResourceImprovement {
+	return &types.ResourceImprovement{
+		CPUVarianceBefore:       lc.calculateCoefficientOfVariation(before.Nodes, "cpu"),
+		CPUVarianceAfter:        lc.calculateCoefficientOfVariation(after.Nodes, "cpu"),
+		MemoryVarianceBefore:    lc.calculateCoefficientOfVariation(before.Nodes, "memory"),
+		MemoryVarianceAfter:     lc.calculateCoefficientOfVariation(after.Nodes, "memory"),
+		GPUVarianceBefore:       lc.calculateCoefficientOfVariation(before.Nodes, "gpu"),
+		GPUVarianceAfter:        lc.calculateCoefficientOfVariation(after.Nodes, "gpu"),
+		BalanceScoreImprovement: after.BalanceScore - before.BalanceScore,
+
+		// Storage I/O variance improvements
+		StorageReadVarianceBefore:  lc.calculateCoefficientOfVariation(before.Nodes, "storage_read"),
+		StorageReadVarianceAfter:   lc.calculateCoefficientOfVariation(after.Nodes, "storage_read"),
+		StorageWriteVarianceBefore: lc.calculateCoefficientOfVariation(before.Nodes, "storage_write"),
+		StorageWriteVarianceAfter:  lc.calculateCoefficientOfVariation(after.Nodes, "storage_write"),
+		StorageIOPSVarianceBefore:  lc.calculateCoefficientOfVariation(before.Nodes, "storage_iops"),
+		StorageIOPSVarianceAfter:   lc.calculateCoefficientOfVariation(after.Nodes, "storage_iops"),
+	}
+}
+
+// GetLoadbalancingJob retrieves a loadbalancing job by ID
+func (lc *LoadbalancingController) GetLoadbalancingJob(jobID string) (*types.LoadbalancingResponse, error) {
+	lc.jobsMux.RLock()
+	job, exists := lc.jobs[jobID]
+	lc.jobsMux.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("loadbalancing job not found: %s", jobID)
+	}
+
+	return &types.LoadbalancingResponse{
+		LoadbalancingID: job.ID,
+		Status:          job.Status,
+		Message:         lc.getStatusMessage(job.Status),
+		Details:         job.Details,
+	}, nil
+}
+
+// ListLoadbalancingJobs lists all loadbalancing jobs
+func (lc *LoadbalancingController) ListLoadbalancingJobs() []*types.LoadbalancingResponse {
+	lc.jobsMux.RLock()
+	defer lc.jobsMux.RUnlock()
+
+	result := make([]*types.LoadbalancingResponse, 0, len(lc.jobs))
+	for _, job := range lc.jobs {
+		result = append(result, &types.LoadbalancingResponse{
+			LoadbalancingID: job.ID,
+			Status:          job.Status,
+			Message:         lc.getStatusMessage(job.Status),
+			Details:         job.Details,
+		})
+	}
+	return result
+}
+
+// CancelLoadbalancing cancels a running loadbalancing job
+func (lc *LoadbalancingController) CancelLoadbalancing(jobID string) error {
+	lc.jobsMux.RLock()
+	job, exists := lc.jobs[jobID]
+	lc.jobsMux.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("loadbalancing job not found: %s", jobID)
+	}
+
+	if job.Status == types.LoadbalancingStatusCompleted ||
+		job.Status == types.LoadbalancingStatusFailed ||
+		job.Status == types.LoadbalancingStatusCancelled {
+		return fmt.Errorf("cannot cancel loadbalancing job in status: %s", job.Status)
+	}
+
+	job.cancel()
+	log.Printf("Loadbalancing job %s cancelled", jobID)
+	return nil
+}
+
+// GetMetrics returns loadbalancing metrics
+func (lc *LoadbalancingController) GetMetrics() *types.LoadbalancingMetrics {
+	lc.jobsMux.RLock()
+	defer lc.jobsMux.RUnlock()
+
+	// Create a copy to avoid race conditions
+	metrics := *lc.metrics
+	return &metrics
+}
+
+// getStatusMessage returns a human-readable status message
+func (lc *LoadbalancingController) getStatusMessage(status types.LoadbalancingStatus) string {
+	switch status {
+	case types.LoadbalancingStatusPending:
+		return "Loadbalancing job is pending"
+	case types.LoadbalancingStatusAnalyzing:
+		return "Analyzing cluster state"
+	case types.LoadbalancingStatusExecuting:
+		return "Executing pod migrations"
+	case types.LoadbalancingStatusCompleted:
+		return "Loadbalancing completed successfully"
+	case types.LoadbalancingStatusFailed:
+		return "Loadbalancing failed"
+	case types.LoadbalancingStatusCancelled:
+		return "Loadbalancing cancelled"
+	default:
+		return "Unknown status"
+	}
+}

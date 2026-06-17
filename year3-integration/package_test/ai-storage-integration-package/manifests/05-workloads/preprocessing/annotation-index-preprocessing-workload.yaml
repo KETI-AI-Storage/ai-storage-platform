@@ -1,0 +1,271 @@
+# annotation-index-preprocessing-workload.yaml
+# MSCOCO 호환 annotation JSON을 인덱싱해 small-metadata 캐시를 생성하는 Job.
+#
+# Author: 미정 <unknown@example.com>
+# Created: 2026-05-28
+#
+# 설계 의도:
+# - raw annotation PVC(/data/raw)는 dataset-ingest 성격의 metadata-read → L3 기대.
+# - index PVC(/data/index)는 caption/category 기반 작은 metadata 반복 조회 → L1 기대.
+# - 로그 PVC(/data/logs)는 archive 성격 → S3 기대.
+# - storageClassName은 의도적으로 비워 둔다. ai-storage webhook이 PVC annotation을 보고 주입한다.
+# - schedulerName / insight-trace sidecar / shareProcessNamespace는 webhook이 주입한다.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-storage-workloads
+  labels:
+    keti-ai-storage-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: annotation-index-workload
+  namespace: ai-storage-workloads
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: annotation-index-workload-pod-reader
+  namespace: ai-storage-workloads
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: annotation-index-workload-pod-reader
+  namespace: ai-storage-workloads
+subjects:
+  - kind: ServiceAccount
+    name: annotation-index-workload
+    namespace: ai-storage-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: annotation-index-workload-pod-reader
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: annotation-index-raw-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: dataset-ingest
+    storage.keti.io/data-role: raw-dataset
+    storage.keti.io/priority: medium
+    storage.keti.io/io-pattern: metadata-read
+  labels:
+    app: annotation-index-preprocessing-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: annotation-index-cache-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: preprocessing
+    storage.keti.io/data-role: cache
+    storage.keti.io/access-pattern: repeated
+    storage.keti.io/io-pattern: metadata-read
+    storage.keti.io/latency: ultra-low
+  labels:
+    app: annotation-index-preprocessing-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: annotation-index-result-log-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: archive
+    storage.keti.io/data-role: result-backup
+    storage.keti.io/priority: low
+  labels:
+    app: annotation-index-preprocessing-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: annotation-index-preprocessing-workload
+  namespace: ai-storage-workloads
+  labels:
+    app: annotation-index-preprocessing-workload
+    workload.keti.io/type: preprocessing
+    workload.keti.io/stage: indexing
+    workload.keti.io/framework: pytorch
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: annotation-index-preprocessing-workload
+        workload.keti.io/type: preprocessing
+        workload.keti.io/stage: indexing
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: index-build
+        insight-trace.keti.io/main-container: index-build
+    spec:
+      serviceAccountName: annotation-index-workload
+      restartPolicy: Never
+      containers:
+        - name: index-build
+          image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args:
+            - |
+              python3 -u /opt/workloads/annotation_index_preprocess.py
+          env:
+            - name: RAW_DIR
+              value: /data/raw
+            - name: ANNOTATION_FILE
+              value: annotations.json
+            - name: INDEX_DIR
+              value: /data/index
+            - name: LOG_DIR
+              value: /data/logs
+            - name: SAMPLE_IMAGES
+              value: "256"
+            - name: SAMPLE_CATEGORIES
+              value: "8"
+            - name: ANNOTATIONS_PER_IMAGE
+              value: "3"
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          volumeMounts:
+            - name: workload-scripts
+              mountPath: /opt/workloads
+            - name: raw-annotation
+              mountPath: /data/raw
+            - name: index-cache
+              mountPath: /data/index
+            - name: result-log
+              mountPath: /data/logs
+      volumes:
+        - name: workload-scripts
+          configMap:
+            name: annotation-index-preprocess-script
+        - name: raw-annotation
+          persistentVolumeClaim:
+            claimName: annotation-index-raw-pvc
+        - name: index-cache
+          persistentVolumeClaim:
+            claimName: annotation-index-cache-pvc
+        - name: result-log
+          persistentVolumeClaim:
+            claimName: annotation-index-result-log-pvc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: annotation-index-preprocess-script
+  namespace: ai-storage-workloads
+data:
+  annotation_index_preprocess.py: |
+    """annotation index 생성 entrypoint (ConfigMap 임베드 버전)."""
+    from __future__ import annotations
+    import json, os, random, re, time
+    from collections import defaultdict
+    from pathlib import Path
+
+    raw_dir = Path(os.getenv("RAW_DIR", "/data/raw"))
+    annotation_file = os.getenv("ANNOTATION_FILE", "annotations.json")
+    index_dir = Path(os.getenv("INDEX_DIR", "/data/index"))
+    log_dir = Path(os.getenv("LOG_DIR", "/data/logs"))
+    sample_images = int(os.getenv("SAMPLE_IMAGES", "256"))
+    sample_categories = int(os.getenv("SAMPLE_CATEGORIES", "8"))
+    per_image = int(os.getenv("ANNOTATIONS_PER_IMAGE", "3"))
+    for p in (raw_dir, index_dir, log_dir):
+        p.mkdir(parents=True, exist_ok=True)
+
+    annotation_path = raw_dir / annotation_file
+    started = time.perf_counter()
+    loaded_from_disk = annotation_path.exists()
+    if loaded_from_disk:
+        with annotation_path.open("r", encoding="utf-8") as fp:
+            annotation = json.load(fp)
+    else:
+        rng = random.Random(42)
+        keywords = ["dog", "cat", "person", "car", "bicycle", "tree", "road", "building"]
+        images = [{"id": i, "file_name": f"img_{i:06d}.jpg", "width": 640, "height": 480} for i in range(1, sample_images + 1)]
+        categories = [{"id": i, "name": keywords[i % len(keywords)], "supercategory": "object"} for i in range(1, sample_categories + 1)]
+        annotations = []
+        annotation_id = 1
+        for image in images:
+            for _ in range(per_image):
+                category = rng.choice(categories)
+                kw = rng.sample(keywords, k=2)
+                annotations.append({
+                    "id": annotation_id,
+                    "image_id": image["id"],
+                    "category_id": category["id"],
+                    "caption": f"a {kw[0]} near a {kw[1]}",
+                    "bbox": [rng.randint(0, 320), rng.randint(0, 240), rng.randint(32, 320), rng.randint(32, 240)],
+                })
+                annotation_id += 1
+        annotation = {"images": images, "annotations": annotations, "categories": categories}
+        annotation_path.write_text(json.dumps(annotation, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    by_image, by_category, by_keyword = defaultdict(list), defaultdict(list), defaultdict(list)
+    for entry in annotation.get("annotations", []):
+        annotation_id = int(entry["id"])
+        by_image[int(entry["image_id"])].append(annotation_id)
+        by_category[int(entry["category_id"])].append(annotation_id)
+        for token in [t for t in re.findall(r"[a-zA-Z0-9]+", entry.get("caption", "").lower()) if t]:
+            by_keyword[token].append(annotation_id)
+
+    index = {
+        "schema_version": "1",
+        "image_lookup": {int(img["id"]): img.get("file_name", "") for img in annotation.get("images", [])},
+        "category_lookup": {int(c["id"]): c.get("name", str(c["id"])) for c in annotation.get("categories", [])},
+        "by_image": {str(k): v for k, v in by_image.items()},
+        "by_category": {str(k): v for k, v in by_category.items()},
+        "by_caption_keyword": dict(by_keyword),
+    }
+    index_path = index_dir / "annotation_index.json"
+    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    summary = {
+        "status": "completed",
+        "raw_path": str(annotation_path),
+        "raw_loaded_from_disk": loaded_from_disk,
+        "index_path": str(index_path),
+        "images": len(annotation.get("images", [])),
+        "categories": len(annotation.get("categories", [])),
+        "annotations": len(annotation.get("annotations", [])),
+        "keywords_indexed": len(index["by_caption_keyword"]),
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+    }
+    (log_dir / "annotation_index_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)

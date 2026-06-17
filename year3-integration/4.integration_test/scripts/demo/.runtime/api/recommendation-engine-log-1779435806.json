@@ -1,0 +1,1 @@
+[{"node_name":"gpu-server-03","policy_type":"scaling","urgency":"HIGH","probability":72,"resource_type":"CPU","reason":"predicted >= threshold","horizon_minutes":15,"current_utilization":0.52,"predicted_utilization":0.78,"threshold":0.42}]

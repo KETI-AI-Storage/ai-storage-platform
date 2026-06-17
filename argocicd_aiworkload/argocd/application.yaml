@@ -1,0 +1,41 @@
+###############################################################################
+# Argo CD Application for KETI AI Workload Test
+# GitHub: https://github.com/KETI-AI-Storage/argocicd_aiworload
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keti-ai-workload-test
+  namespace: argocd
+  labels:
+    project: keti-ai-storage
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/argocicd_aiworload.git
+    targetRevision: main
+    path: workloads
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ai-workload-test
+
+  syncPolicy:
+    automated:
+      prune: true         # GitHub에서 삭제 시 클러스터에서도 삭제
+      selfHeal: true      # 수동 변경 시 자동 복구
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

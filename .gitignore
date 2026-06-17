@@ -1,0 +1,120 @@
+# =====================================================================
+# Archives / downloaded toolchains (never commit)
+# =====================================================================
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+ai-storage-package/
+ai-storage-package*.tar.gz*
+go1.*/
+go1.*.linux-amd64.tar.gz
+node_exporter-*/
+node_exporter-*.tar.gz
+
+# =====================================================================
+# Local Go caches placed inside the workspace
+# =====================================================================
+.go-cache/
+.go-mod/
+.go-mod-cache/
+.go-home/
+.go-tmp/
+
+# =====================================================================
+# Build artifacts / compiled binaries
+# =====================================================================
+**/bin/
+**/build/_output/
+**/_output/
+*.exe
+*.test
+*.out
+err
+# component binaries dropped at module root by build scripts
+ai-storage-webhook/main
+ai-storage-webhook/webhook
+# downloaded CLI binaries (argo, etc.)
+argo-linux-amd64
+*-linux-amd64
+*-linux-arm64
+*-darwin-amd64
+
+# =====================================================================
+# Large data / ML datasets / scratch backups (never commit)
+# =====================================================================
+backup/
+*.arrow
+*.parquet
+*.npy
+*.npz
+*.bin
+*.ckpt
+*.safetensors
+# huge eval/output dumps
+**/test/output/
+**/test/data/
+
+# =====================================================================
+# Secrets / environment files
+# =====================================================================
+.env
+*.env
+.env.*
+!*.env.example
+!*.env.sample
+*.pem
+*.key
+id_rsa*
+kubeconfig
+*kubeconfig*
+
+# =====================================================================
+# Logs and run/test outputs (integration test runs, etc.)
+# =====================================================================
+*.log
+**/logs/
+**/state/
+year3-integration/**/logs/
+year3-integration/**/state/
+
+# =====================================================================
+# Runtime state stores / databases
+# =====================================================================
+*.db
+*.sqlite
+*.sqlite3
+/data/
+**/state_store.db/
+**/stream_store/
+insight-hub.db
+
+# =====================================================================
+# Python caches
+# =====================================================================
+__pycache__/
+*.pyc
+*.pyo
+
+# =====================================================================
+# Generated presentations / binary media (keep the make_*.py scripts)
+# =====================================================================
+*.pptx
+*.pptm
+
+# =====================================================================
+# Editor / agent scaffolding
+# =====================================================================
+.agents/
+.codex
+.cursor/
+.cursorrules
+skills-lock.json
+.vscode/
+.idea/
+
+# =====================================================================
+# NOTE: vendor/ is intentionally NOT ignored.
+# ai-storage-metric-collector builds with -mod=vendor, so its vendor/
+# must be committed.
+# =====================================================================

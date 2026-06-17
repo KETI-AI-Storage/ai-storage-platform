@@ -1,0 +1,193 @@
+# checkpoint-io-workload.yaml
+# PyTorch checkpoint read/write 부하 생성 Job과 checkpoint PVC 정의.
+#
+# Author: 미정 <unknown@example.com>
+# Created: 2026-05-27
+#
+# storageClassName은 의도적으로 비워 둔다. ai-storage webhook이 PVC annotation을 보고 주입한다.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-storage-workloads
+  labels:
+    keti-ai-storage-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cifar10-workload
+  namespace: ai-storage-workloads
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cifar10-workload-pod-reader
+  namespace: ai-storage-workloads
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cifar10-workload-pod-reader
+  namespace: ai-storage-workloads
+subjects:
+  - kind: ServiceAccount
+    name: cifar10-workload
+    namespace: ai-storage-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cifar10-workload-pod-reader
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-checkpoint-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: training
+    storage.keti.io/data-role: intermediate
+    storage.keti.io/priority: medium
+    storage.keti.io/io-pattern: large-write
+  labels:
+    app: checkpoint-io-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-result-log-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: archive
+    storage.keti.io/data-role: result-backup
+    storage.keti.io/priority: low
+  labels:
+    app: checkpoint-io-workload
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: checkpoint-io-workload
+  namespace: ai-storage-workloads
+  labels:
+    app: checkpoint-io-workload
+    workload.keti.io/type: checkpoint-io
+    workload.keti.io/framework: pytorch
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: checkpoint-io-workload
+        workload.keti.io/type: checkpoint-io
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: checkpoint-io
+    spec:
+      serviceAccountName: cifar10-workload
+      restartPolicy: Never
+      containers:
+        - name: checkpoint-io
+          image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args:
+            - |
+              python3 -u /opt/workloads/checkpoint_io.py
+          env:
+            - name: ITERATIONS
+              value: "8"
+            - name: TENSOR_MB
+              value: "64"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: workload-scripts
+              mountPath: /opt/workloads
+            - name: checkpoints
+              mountPath: /data/checkpoints
+            - name: result-log
+              mountPath: /data/logs
+      volumes:
+        - name: workload-scripts
+          configMap:
+            name: checkpoint-io-script
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: cifar10-checkpoint-pvc
+        - name: result-log
+          persistentVolumeClaim:
+            claimName: cifar10-result-log-pvc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checkpoint-io-script
+  namespace: ai-storage-workloads
+data:
+  checkpoint_io.py: |
+    from __future__ import annotations
+    import json, os, time
+    from pathlib import Path
+    import torch
+
+    checkpoint_dir = Path(os.getenv("CHECKPOINT_DIR", "/data/checkpoints"))
+    log_dir = Path(os.getenv("LOG_DIR", "/data/logs"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    iterations = int(os.getenv("ITERATIONS", "8"))
+    tensor_mb = int(os.getenv("TENSOR_MB", "64"))
+    element_count = tensor_mb * 1024 * 1024 // 4
+    started = time.perf_counter()
+    write_seconds = read_seconds = 0.0
+    paths = []
+    for index in range(iterations):
+        path = checkpoint_dir / f"io_test_{index:03d}.pt"
+        payload = {"iteration": index, "tensor": torch.randn(element_count)}
+        write_started = time.perf_counter()
+        torch.save(payload, path)
+        write_seconds += time.perf_counter() - write_started
+        read_started = time.perf_counter()
+        loaded = torch.load(path, map_location="cpu")
+        read_seconds += time.perf_counter() - read_started
+        checksum = float(loaded["tensor"][:1024].sum().item())
+        paths.append(str(path))
+        print(f"io iteration={index} path={path} checksum={checksum:.6f}", flush=True)
+    total_mb = iterations * tensor_mb
+    summary = {
+        "status": "completed",
+        "iterations": iterations,
+        "tensor_mb": tensor_mb,
+        "total_write_mb": total_mb,
+        "total_read_mb": total_mb,
+        "write_seconds": round(write_seconds, 3),
+        "read_seconds": round(read_seconds, 3),
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "paths": paths,
+    }
+    (log_dir / "checkpoint_io_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps(summary, indent=2), flush=True)

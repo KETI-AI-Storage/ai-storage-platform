@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keti
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-storage-scheduler
+  namespace: keti
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-storage-scheduler
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["pods/binding"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods/status"]
+  verbs: ["patch", "update"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities"]
+  verbs: ["get", "list", "watch"]
+# Kueue resources for KueueAware plugin
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["workloads", "localqueues", "clusterqueues"]
+  verbs: ["get", "list", "watch"]
+# AIStorageConfig CRD for dynamic configuration
+- apiGroups: ["ai-storage.keti"]
+  resources: ["aistorageconfigs"]
+  verbs: ["get", "list", "watch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ai-storage-scheduler
+subjects:
+- kind: ServiceAccount
+  name: ai-storage-scheduler
+  namespace: keti
+roleRef:
+  kind: ClusterRole
+  name: ai-storage-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: ai-storage-scheduler
+    component: ai-storage-scheduler
+  name: ai-storage-scheduler
+  namespace: keti
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-storage-scheduler
+      component: ai-storage-scheduler
+  template:
+    metadata:
+      labels:
+        app: ai-storage-scheduler
+        component: ai-storage-scheduler
+      name: ai-storage-scheduler
+    spec:
+      serviceAccountName: ai-storage-scheduler
+      # Control Plane에 배치
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: ai-storage-scheduler
+          image: ketidevit2/keti-ai-storage-scheduler:latest
+          imagePullPolicy: Always
+          env:
+            - name: APOLLO_ENDPOINT
+              value: "scheduling-policy-engine.apollo.svc.cluster.local:50054"
+          resources:
+            limits:
+              memory: "500Mi"
+              cpu: "500m"
+            requests:
+              memory: "200Mi"
+              cpu: "100m"

@@ -1,0 +1,392 @@
+syntax = "proto3";
+
+package insight.scope.v1;
+
+option go_package = "insight-scope/proto/scopepb";
+
+// ============================================
+// Insight Scope gRPC Service
+// AI 워크로드 분석 및 모델 감지 서비스
+// Orchestrator, Scheduler 등에서 호출
+// ============================================
+
+service InsightScopeService {
+  // Pod 분석 요청 (YAML 또는 기존 Pod)
+  rpc AnalyzePod(AnalyzePodRequest) returns (AnalyzePodResponse);
+
+  // 캐시된 분석 결과 조회
+  rpc GetCachedAnalysis(GetCachedAnalysisRequest) returns (AnalyzePodResponse);
+
+  // 네임스페이스의 모든 Pod 분석
+  rpc AnalyzeNamespace(AnalyzeNamespaceRequest) returns (AnalyzeNamespaceResponse);
+
+  // AI 모델 프로필 조회
+  rpc GetModelProfile(GetModelProfileRequest) returns (ModelProfileResponse);
+
+  // 모델 검색
+  rpc SearchModels(SearchModelsRequest) returns (SearchModelsResponse);
+
+  // 모든 모델 목록
+  rpc ListAllModels(ListAllModelsRequest) returns (ListAllModelsResponse);
+
+  // 스토리지 추천 (모델 타입 기반)
+  rpc GetStorageRecommendation(GetRecommendationRequest) returns (StorageRecommendationResponse);
+
+  // 카테고리별 스토리지 추천
+  rpc GetCategoryRecommendation(GetCategoryRecommendationRequest) returns (StorageRecommendationResponse);
+
+  // 분석 결과 스트림 (새 분석 결과 구독)
+  rpc StreamAnalysisResults(StreamAnalysisRequest) returns (stream AnalyzePodResponse);
+
+  // 헬스 체크
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================
+// Request Messages
+// ============================================
+
+message AnalyzePodRequest {
+  oneof target {
+    string pod_yaml = 1;           // Raw YAML 문자열
+    PodReference pod_ref = 2;      // 기존 Pod 참조
+  }
+  bool include_trace_data = 3;     // Insight Trace 데이터 포함
+  bool wait_for_trace = 4;         // Trace 데이터 대기
+}
+
+message PodReference {
+  string name = 1;
+  string namespace = 2;
+}
+
+message GetCachedAnalysisRequest {
+  string pod_name = 1;
+  string namespace = 2;
+}
+
+message AnalyzeNamespaceRequest {
+  string namespace = 1;
+  bool include_trace_data = 2;
+}
+
+message GetModelProfileRequest {
+  string model_type = 1;  // e.g., "bert", "resnet", "llama"
+}
+
+message SearchModelsRequest {
+  string keyword = 1;
+}
+
+message ListAllModelsRequest {
+  // 빈 요청
+}
+
+message GetRecommendationRequest {
+  oneof criteria {
+    string model_type = 1;      // 모델 타입으로 추천
+    string model_category = 2;   // 카테고리로 추천
+    WorkloadSpec workload_spec = 3;  // 워크로드 스펙으로 추천
+  }
+}
+
+message GetCategoryRecommendationRequest {
+  ModelCategory category = 1;
+}
+
+message WorkloadSpec {
+  string workload_type = 1;  // training, inference, etc.
+  int32 gpu_count = 2;
+  int64 data_size_gb = 3;
+  string framework = 4;
+}
+
+message StreamAnalysisRequest {
+  string namespace = 1;  // 특정 네임스페이스 (빈 문자열 = 모든 네임스페이스)
+}
+
+message HealthCheckRequest {
+  // 빈 요청
+}
+
+// ============================================
+// Response Messages
+// ============================================
+
+message AnalyzePodResponse {
+  string analysis_id = 1;
+  string pod_name = 2;
+  string pod_namespace = 3;
+  string container_name = 4;
+
+  YAMLAnalysisResult yaml_analysis = 5;
+  TraceAnalysisResult trace_analysis = 6;
+  AIModelSignature model_signature = 7;
+
+  PipelineStage current_stage = 8;
+  StorageRecommendation storage_recommendation = 9;
+
+  int64 analyzed_at_unix = 10;
+  double analysis_duration_ms = 11;
+}
+
+message AnalyzeNamespaceResponse {
+  string namespace = 1;
+  int32 total_count = 2;
+  repeated AnalyzePodResponse analyses = 3;
+}
+
+message ModelProfileResponse {
+  ModelProfile profile = 1;
+}
+
+message SearchModelsResponse {
+  string query = 1;
+  int32 count = 2;
+  repeated ModelSearchResult results = 3;
+}
+
+message ModelSearchResult {
+  string model_type = 1;
+  ModelCategory category = 2;
+  ModelProfile profile = 3;
+}
+
+message ListAllModelsResponse {
+  int32 total_count = 1;
+  map<string, ModelList> by_category = 2;  // category -> model list
+  repeated string all_models = 3;
+}
+
+message ModelList {
+  repeated string models = 1;
+}
+
+message StorageRecommendationResponse {
+  StorageRecommendation recommendation = 1;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string component = 2;
+  int64 timestamp_unix = 3;
+}
+
+// ============================================
+// Data Types
+// ============================================
+
+message YAMLAnalysisResult {
+  ImageAnalysis image_analysis = 1;
+  CommandAnalysis command_analysis = 2;
+  repeated VolumeAnalysis volume_analyses = 3;
+  ResourceAnalysis resource_analysis = 4;
+  AnnotationAnalysis annotation_analysis = 5;
+
+  string inferred_model = 6;
+  ModelCategory inferred_category = 7;
+  string inferred_framework = 8;
+  PipelineStage inferred_stage = 9;
+  DataType inferred_data_type = 10;
+  double confidence = 11;
+}
+
+message ImageAnalysis {
+  string image_name = 1;
+  string image_tag = 2;
+  string registry = 3;
+  string detected_framework = 4;
+  string detected_model = 5;
+  bool has_gpu_support = 6;
+  string base_image = 7;
+  double confidence = 8;
+  repeated string hints = 9;
+}
+
+message CommandAnalysis {
+  repeated string command = 1;
+  repeated string args = 2;
+  PipelineStage detected_stage = 3;
+  string detected_model = 4;
+  DataType detected_data_type = 5;
+  int32 batch_size = 6;
+  int32 epochs = 7;
+  double learning_rate = 8;
+  string model_path = 9;
+  string data_path = 10;
+  string output_path = 11;
+  double confidence = 12;
+  repeated string keywords = 13;
+}
+
+message VolumeAnalysis {
+  string volume_name = 1;
+  string mount_path = 2;
+  string volume_type = 3;
+  bool read_only = 4;
+  string purpose_estimate = 5;
+  string estimated_size = 6;
+  IOPattern io_pattern = 7;
+  double read_write_ratio = 8;
+}
+
+message ResourceAnalysis {
+  string cpu_request = 1;
+  string cpu_limit = 2;
+  string memory_request = 3;
+  string memory_limit = 4;
+  int32 gpu_request = 5;
+  string gpu_type = 6;
+  int64 estimated_iops = 7;
+  int64 estimated_throughput = 8;
+  string io_bottleneck_risk = 9;
+  double confidence = 10;
+}
+
+message AnnotationAnalysis {
+  map<string, string> labels = 1;
+  map<string, string> annotations = 2;
+  string explicit_workload = 3;
+  string explicit_model = 4;
+  string explicit_stage = 5;
+  string kubeflow_job = 6;
+  string volcano_job = 7;
+  bool has_insight_trace = 8;
+}
+
+message TraceAnalysisResult {
+  string trace_id = 1;
+  bool trace_available = 2;
+
+  string detected_model = 3;
+  ModelCategory detected_category = 4;
+  string detected_framework = 5;
+  PipelineStage detected_stage = 6;
+  IOPattern detected_io_pattern = 7;
+
+  double avg_cpu_usage = 8;
+  double avg_memory_usage = 9;
+  double avg_gpu_usage = 10;
+  double avg_read_throughput_mbps = 11;
+  double avg_write_throughput_mbps = 12;
+
+  repeated StageHistoryEntry stage_history = 13;
+  double confidence = 14;
+  int64 last_updated_unix = 15;
+}
+
+message StageHistoryEntry {
+  PipelineStage stage = 1;
+  int64 start_time_unix = 2;
+  int64 end_time_unix = 3;
+  double duration_seconds = 4;
+}
+
+message AIModelSignature {
+  ModelCategory model_category = 1;
+  string model_type = 2;
+  string model_name = 3;
+  string model_variant = 4;
+  string model_version = 5;
+
+  string framework = 6;
+  string framework_version = 7;
+
+  DataType data_type = 8;
+  string input_shape = 9;
+  string output_shape = 10;
+
+  int64 estimated_params = 11;
+  int64 estimated_flops = 12;
+  int32 batch_size = 13;
+  int32 sequence_length = 14;
+
+  IOPattern io_pattern = 15;
+  double read_write_ratio = 16;
+  string estimated_data_size = 17;
+
+  string recommended_storage_class = 18;
+  string recommended_storage_size = 19;
+  int64 recommended_iops = 20;
+  int64 recommended_throughput_mbps = 21;
+
+  string detection_source = 22;
+  double confidence = 23;
+  int64 detected_at_unix = 24;
+}
+
+message ModelProfile {
+  string model_type = 1;
+  ModelCategory model_category = 2;
+  repeated string common_names = 3;
+  repeated string keywords = 4;
+  repeated string image_patterns = 5;
+  repeated string command_patterns = 6;
+
+  DataType typical_data_type = 7;
+  IOPattern typical_io_pattern = 8;
+  int64 typical_params = 9;
+
+  string recommended_storage_class = 10;
+  string recommended_storage_size = 11;
+  int64 recommended_iops = 12;
+  int64 recommended_throughput_mbps = 13;
+  double read_write_ratio = 14;
+}
+
+message StorageRecommendation {
+  string storage_class = 1;
+  string storage_size = 2;
+  string access_mode = 3;
+  int64 iops = 4;
+  int64 throughput_mbps = 5;
+  string cache_tier = 6;
+  string reasoning = 7;
+  string alternative_class = 8;
+}
+
+// ============================================
+// Enums
+// ============================================
+
+enum ModelCategory {
+  MODEL_CATEGORY_UNKNOWN = 0;
+  MODEL_CATEGORY_VISION = 1;
+  MODEL_CATEGORY_NLP = 2;
+  MODEL_CATEGORY_AUDIO = 3;
+  MODEL_CATEGORY_MULTIMODAL = 4;
+  MODEL_CATEGORY_GENERATIVE = 5;
+  MODEL_CATEGORY_REINFORCEMENT = 6;
+  MODEL_CATEGORY_TABULAR = 7;
+}
+
+enum PipelineStage {
+  PIPELINE_STAGE_UNKNOWN = 0;
+  PIPELINE_STAGE_PREPROCESSING = 1;
+  PIPELINE_STAGE_TRAINING = 2;
+  PIPELINE_STAGE_EVALUATION = 3;
+  PIPELINE_STAGE_INFERENCE = 4;
+  PIPELINE_STAGE_SERVING = 5;
+  PIPELINE_STAGE_FINETUNING = 6;
+}
+
+enum DataType {
+  DATA_TYPE_UNKNOWN = 0;
+  DATA_TYPE_IMAGE = 1;
+  DATA_TYPE_TEXT = 2;
+  DATA_TYPE_AUDIO = 3;
+  DATA_TYPE_VIDEO = 4;
+  DATA_TYPE_TABULAR = 5;
+  DATA_TYPE_TIMESERIES = 6;
+  DATA_TYPE_GRAPH = 7;
+  DATA_TYPE_POINT3D = 8;
+}
+
+enum IOPattern {
+  IO_PATTERN_BALANCED = 0;
+  IO_PATTERN_SEQUENTIAL_READ = 1;
+  IO_PATTERN_RANDOM_READ = 2;
+  IO_PATTERN_BURST_WRITE = 3;
+  IO_PATTERN_WRITE_HEAVY = 4;
+  IO_PATTERN_DISTRIBUTED = 5;
+}

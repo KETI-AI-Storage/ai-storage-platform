@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cpu-preprocessing-pipeline-workload-data
+  labels:
+    app: cpu-preprocessing-pipeline-workload
+    stage: preprocess
+    gpuCount: "0"
+    workload.keti.io/type: preprocessing
+    workload.keti.io/stage: preprocess
+    workload.keti.io/framework: pytorch
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName 미지정 → webhook 정책이 storage-burst(stage=preprocess)로 채움.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-preprocessing-pipeline-workload
+  labels:
+    app: cpu-preprocessing-pipeline-workload
+    stage: preprocess
+    gpuCount: "0"
+    workload.keti.io/type: preprocessing
+    workload.keti.io/stage: preprocess
+    workload.keti.io/framework: pytorch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cpu-preprocessing-pipeline-workload
+  template:
+    metadata:
+      labels:
+        app: cpu-preprocessing-pipeline-workload
+        stage: preprocess
+        gpuCount: "0"
+        workload.keti.io/type: preprocessing
+        workload.keti.io/stage: preprocess
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: preprocess
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: preprocess
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "main installing torch (CPU wheel)"
+              # PyTorch 공식 CPU wheel index에서 설치. 인터넷 접근이 필요한 단계.
+              pip install --quiet --no-cache-dir --disable-pip-version-check \
+                torch --index-url https://download.pytorch.org/whl/cpu
+              echo "main torch installed"
+              exec python3 -u -c '
+              import json
+              import os
+              import time
+              import torch
+
+              base_dir = os.environ.get("PREPROCESS_DIR", "/data/preprocess")
+              os.makedirs(base_dir, exist_ok=True)
+              chunks_dir = os.path.join(base_dir, "chunks")
+              os.makedirs(chunks_dir, exist_ok=True)
+
+              cuda_available = torch.cuda.is_available()
+              device = "cpu"
+              print(f"main torch_version={torch.__version__}", flush=True)
+              print(f"main cuda_available={cuda_available}", flush=True)
+              print(f"main device={device}", flush=True)
+              print(f"main output_dir={base_dir}", flush=True)
+
+              torch.manual_seed(42)
+              n_samples = 1024
+              feature_dim = 8
+              chunk_size = 128
+              x = torch.randn(n_samples, feature_dim)
+              y = (x.sum(dim=1) > 0).long()
+
+              num_chunks = n_samples // chunk_size
+              for i in range(num_chunks):
+                  start = i * chunk_size
+                  end = start + chunk_size
+                  chunk_path = os.path.join(chunks_dir, f"chunk-{i:03d}.pt")
+                  torch.save(
+                      {"features": x[start:end], "labels": y[start:end]},
+                      chunk_path,
+                  )
+                  print(
+                      f"main chunk {i} saved "
+                      f"features={list(x[start:end].shape)} "
+                      f"labels={list(y[start:end].shape)}",
+                      flush=True,
+                  )
+                  if i == 0:
+                      print(f"main chunk_path={chunk_path}", flush=True)
+
+              manifest = {
+                  "samples": int(n_samples),
+                  "chunks": int(num_chunks),
+                  "feature_dim": int(feature_dim),
+                  "framework": "pytorch",
+                  "torch_version": torch.__version__,
+                  "cuda_available": bool(cuda_available),
+                  "device": device,
+              }
+              manifest_path = os.path.join(base_dir, "manifest.json")
+              with open(manifest_path, "w") as fp:
+                  json.dump(manifest, fp, indent=2)
+              print(f"main manifest_path={manifest_path}", flush=True)
+              print(f"main manifest written: {manifest}", flush=True)
+              print("main complete", flush=True)
+
+              # Scenario 2 관측을 위해 Pod을 살려두는 heartbeat 루프.
+              while True:
+                  time.sleep(60)
+                  print("main heartbeat", flush=True)
+              '
+          env:
+            - name: PREPROCESS_DIR
+              value: /data/preprocess
+            - name: PIP_DISABLE_PIP_VERSION_CHECK
+              value: "1"
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cpu-preprocessing-pipeline-workload-data

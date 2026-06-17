@@ -1,0 +1,57 @@
+# =============================================================================
+# Kueue 테스트 Job
+# =============================================================================
+# Kueue를 사용하려면 Job에 다음 레이블을 추가해야 합니다:
+#   kueue.x-k8s.io/queue-name: <LocalQueue 이름>
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kueue-test-job
+  namespace: default
+  labels:
+    # ─────────────────────────────────────────────────────────────────────────
+    # 중요! 이 레이블이 Kueue와 연동하는 핵심입니다.
+    # LocalQueue 이름을 지정하면 Kueue가 이 Job을 관리합니다.
+    # ─────────────────────────────────────────────────────────────────────────
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        app: kueue-test
+    spec:
+      # AI Storage Scheduler 사용 (선택적)
+      schedulerName: ai-storage-scheduler
+      containers:
+      - name: test-container
+        image: busybox:latest
+        command: ["sh", "-c"]
+        args:
+        - |
+          echo "=========================================="
+          echo "Kueue Test Job Started!"
+          echo "=========================================="
+          echo "Hostname: $(hostname)"
+          echo "Date: $(date)"
+          echo ""
+          echo "This job was queued by Kueue and"
+          echo "scheduled by AI Storage Scheduler"
+          echo ""
+          echo "Simulating work for 10 seconds..."
+          sleep 10
+          echo ""
+          echo "Job completed successfully!"
+          echo "=========================================="
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+      restartPolicy: Never
+  backoffLimit: 2

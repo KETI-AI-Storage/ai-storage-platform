@@ -1,0 +1,128 @@
+# ============================================
+# AI Inference Deployment with Insight-Trace Sidecar
+# 지속적으로 실행되는 추론 서비스
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpt-inference-test
+  namespace: ai-workload-test
+  labels:
+    app: gpt-inference
+    workload-type: inference
+    ai-model: gpt
+    project: keti-ai-storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpt-inference
+  template:
+    metadata:
+      labels:
+        app: gpt-inference
+        workload-type: inference
+        ai-model: gpt
+      annotations:
+        insight.keti.re.kr/enabled: "true"
+        insight.keti.re.kr/model: "gpt-2"
+        insight.keti.re.kr/framework: "pytorch"
+    spec:
+      # Custom scheduler
+      schedulerName: ai-storage-scheduler
+
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+
+      # 프로세스 네임스페이스 공유 - 사이드카가 메인 컨테이너 프로세스를 볼 수 있음
+      shareProcessNamespace: true
+
+      containers:
+      # Main Inference Container - 실제 Python 프로세스로 실행
+      - name: inference
+        image: python:3.11-slim
+        command:
+        - python3
+        - -c
+        - |
+          import time
+          import sys
+          # 프로세스 이름에 pytorch/transformer 키워드 포함
+          sys.argv[0] = 'gpt_transformer_inference.py'
+          print("=== KETI AI Inference Service (PyTorch GPT) ===")
+          print("Model: GPT-2, Framework: PyTorch")
+          counter = 0
+          while True:
+              counter += 1
+              print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Inference request #{counter}")
+              # 실제 I/O 시뮬레이션
+              with open(f'/tmp/inference_{counter}.bin', 'wb') as f:
+                  f.write(b'0' * 102400)  # 100KB
+              import os
+              os.remove(f'/tmp/inference_{counter}.bin')
+              time.sleep(5)
+        ports:
+        - containerPort: 8080
+          name: http
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+
+      # Insight-Trace Sidecar
+      - name: insight-trace
+        image: ketidevit2/insight-trace:latest
+        imagePullPolicy: Always
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: APOLLO_ENDPOINT
+          value: "apollo-policy-server.keti.svc.cluster.local:50051"
+        - name: SIDECAR_PORT
+          value: "9090"
+        - name: GRPC_PORT
+          value: "9091"
+        - name: METRICS_INTERVAL
+          value: "5s"
+        - name: ANALYSIS_INTERVAL
+          value: "10s"
+        - name: REPORT_INTERVAL
+          value: "30s"
+        ports:
+        - containerPort: 9090
+          name: sidecar-http
+        - containerPort: 9091
+          name: sidecar-grpc
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+          readOnly: true
+
+      volumes:
+      - name: model-cache
+        emptyDir: {}

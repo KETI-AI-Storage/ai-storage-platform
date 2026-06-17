@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package apollo.forecaster.v1;
+
+option go_package = "apollo/node-resource-forecaster/proto/forecasterpb";
+
+import "google/protobuf/timestamp.proto";
+
+// ============================================
+// Node Resource Forecaster gRPC Service
+// 노드 리소스 사용량 예측 서비스
+// ============================================
+
+service NodeResourceForecasterService {
+  // 특정 노드의 리소스 사용량 예측
+  rpc ForecastNodeResources(ForecastNodeRequest) returns (ForecastNodeResponse);
+
+  // 클러스터 전체 리소스 사용량 예측
+  rpc ForecastClusterResources(ForecastClusterRequest) returns (ForecastClusterResponse);
+
+  // 피크/유휴 시간대 예측
+  rpc GetPeakIdlePrediction(PeakIdleRequest) returns (PeakIdleResponse);
+
+  // 히스토리 데이터 제출 (Insight-Scope에서 호출)
+  rpc SubmitHistoryData(SubmitHistoryRequest) returns (SubmitHistoryResponse);
+
+  // 헬스 체크
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================
+// Request Messages
+// ============================================
+
+message ForecastNodeRequest {
+  string node_name = 1;
+  repeated int32 forecast_horizons_minutes = 2;  // e.g., [5, 10, 30, 60]
+}
+
+message ForecastClusterRequest {
+  repeated int32 forecast_horizons_minutes = 1;
+  bool include_node_breakdown = 2;  // 노드별 예측 포함 여부
+}
+
+message PeakIdleRequest {
+  string node_name = 1;  // 빈 문자열이면 클러스터 전체
+  int32 lookahead_hours = 2;  // 몇 시간 앞까지 예측할지
+}
+
+message SubmitHistoryRequest {
+  string node_name = 1;
+  repeated ResourceSnapshot snapshots = 2;
+}
+
+message ResourceSnapshot {
+  google.protobuf.Timestamp timestamp = 1;
+  double cpu_utilization = 2;      // 0.0 ~ 1.0
+  double memory_utilization = 3;   // 0.0 ~ 1.0
+  double gpu_utilization = 4;      // 0.0 ~ 1.0
+  double storage_io_utilization = 5;  // 0.0 ~ 1.0
+}
+
+message HealthCheckRequest {}
+
+// ============================================
+// Response Messages
+// ============================================
+
+message ForecastNodeResponse {
+  string node_name = 1;
+  repeated ResourceForecast forecasts = 2;
+  double confidence = 3;  // 전체 예측 신뢰도
+}
+
+message ResourceForecast {
+  int32 horizon_minutes = 1;
+  double predicted_cpu_utilization = 2;
+  double predicted_memory_utilization = 3;
+  double predicted_gpu_utilization = 4;
+  double predicted_storage_io_utilization = 5;
+  double confidence_interval_lower = 6;
+  double confidence_interval_upper = 7;
+}
+
+message ForecastClusterResponse {
+  repeated ResourceForecast cluster_forecasts = 1;  // 클러스터 평균 예측
+  map<string, NodeForecastResult> node_forecasts = 2;  // 노드별 예측 (옵션)
+}
+
+message NodeForecastResult {
+  repeated ResourceForecast forecasts = 1;
+  double confidence = 2;
+}
+
+message PeakIdleResponse {
+  repeated PeakIdlePeriod peak_periods = 1;
+  repeated PeakIdlePeriod idle_periods = 2;
+  BatchWindowRecommendation recommended_batch_window = 3;
+}
+
+message PeakIdlePeriod {
+  int32 horizon_minutes = 1;  // 현재로부터 몇 분 후
+  double avg_utilization = 2;
+  double confidence = 3;
+}
+
+message BatchWindowRecommendation {
+  int32 start_offset_minutes = 1;  // 시작 시점 (현재로부터)
+  int32 end_offset_minutes = 2;    // 종료 시점
+  double expected_utilization = 3;  // 해당 시간대 예상 사용률
+}
+
+message SubmitHistoryResponse {
+  bool accepted = 1;
+  int32 snapshots_processed = 2;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+  int32 model_ready = 3;  // 0: not ready, 1: ready
+  int64 total_predictions = 4;
+  google.protobuf.Timestamp last_training_time = 5;
+}

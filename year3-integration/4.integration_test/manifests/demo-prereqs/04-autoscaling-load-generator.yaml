@@ -1,0 +1,50 @@
+# Autoscaling 데모 전용 부하 발생기 Job.
+#
+# 목적: ai-storage-orchestrator/pkg/k8s/client.go:GetWorkloadPodMetrics 가 metrics-server
+#       에서 가져온 CPU 사용량이 targetCPU(=80%) 를 넘어야 calculateDesiredReplicas
+#       가 replicas 를 2 이상으로 올린다.
+#       시연 워크로드 Pod 내부에 진입할 수 없을 수 있으므로 별도의 Job 으로
+#       동일 Service/Endpoint 를 두드릴 필요 없이, 데모는 _minReplicas=2_ 만으로도
+#       즉시 1->2 스케일업을 만들 수 있다. 이 Job 은 _보조_ 부하용이다(선택).
+#
+# 사용:
+#   kubectl apply -f 04-autoscaling-load-generator.yaml
+#
+# Author: 미정
+# Created: 2026-05-26
+# Related: ai-storage-orchestrator/pkg/controller/autoscaling.go:calculateDesiredReplicas
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-autoscale-loader
+  namespace: ope-model-verify
+  labels:
+    demo.keti.io/component: autoscaling
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        demo.keti.io/component: autoscaling
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: loader
+          image: busybox:1.36
+          # WHY: 60 초 동안 busy-loop 으로 자기 자신의 CPU 사용률을 100% 까지 끌어올린다.
+          #      이 Pod 자체는 평가 대상 Pod 이 아니지만, 시연 시 노드에 분명한 CPU 압력을
+          #      유발해 metrics-server 가 안정적으로 갱신되도록 돕는다.
+          command:
+            - sh
+            - -c
+            - |
+              end=$(( $(date +%s) + 60 ))
+              while [ "$(date +%s)" -lt "${end}" ]; do :; done
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "32Mi"
+            limits:
+              cpu: "1000m"
+              memory: "64Mi"

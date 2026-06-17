@@ -1,0 +1,38 @@
+# metric-collector.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ai-storage-metric-collector
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: ai-storage-metric-collector
+  template:
+    metadata:
+      labels:
+        app: ai-storage-metric-collector
+    spec:
+      containers:
+      - name: metric-collector
+        image: ketidevit/ai-storage-metric-collector:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 2112
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-storage-metric-collector
+  namespace: monitoring
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "2112"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: ai-storage-metric-collector
+  ports:
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112

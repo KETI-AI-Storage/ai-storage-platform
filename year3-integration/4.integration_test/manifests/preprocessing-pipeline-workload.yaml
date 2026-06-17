@@ -1,0 +1,169 @@
+# preprocessing-pipeline-workload.yaml
+# 시연용 GPU/CUDA PyTorch 전처리 워크로드 정의.
+#
+# Author: 미정
+# Created: 2026-05-21
+# Related: year3-integration/4.integration_test/scripts/demo/run-scenario1.sh
+#
+# 설계 의도:
+# - Webhook(ai-storage-injection.keti.svc)이 주입해야 하는 값은 이 YAML에 작성하지 않는다.
+#   * spec.schedulerName        → webhook이 "ai-storage-scheduler"로 채움
+#   * spec.shareProcessNamespace → webhook이 true로 채움
+#   * spec.containers[insight-trace] sidecar → webhook이 추가
+#   * metadata.annotations.ai-storage/selected-tier → webhook이 stage=preprocess 기반으로 채움
+#   * PVC spec.storageClassName → webhook이 storage-burst로 채움
+# - Webhook 판단에 필요한 최소 메타데이터(app/stage/gpuCount/workload.keti.io/* /mlops.keti.io/main-container)만 둔다.
+# - 이미지: gpu-server-03 노드에 캐시된 pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime 사용.
+# - GPU request/limit: nvidia.com/gpu=1 (gpu-server-03 allocatable=2).
+# - 전처리는 `main complete` 출력 시점에 완료된다.
+# - complete 이후 heartbeat 루프는 전처리가 계속 실행 중이라는 의미가 아니라,
+#   Scenario 2에서 동일 Pod을 관측·trigger 대상으로 쓰기 위해 컨테이너를 유지하는 장치이다.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: preprocessing-pipeline-workload-data
+  labels:
+    app: preprocessing-pipeline-workload
+    stage: preprocess
+    gpuCount: "1"
+    workload.keti.io/type: preprocessing
+    workload.keti.io/stage: preprocess
+    workload.keti.io/framework: pytorch
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName 미지정 → webhook 정책이 storage-burst(stage=preprocess)로 채움.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preprocessing-pipeline-workload
+  labels:
+    app: preprocessing-pipeline-workload
+    stage: preprocess
+    gpuCount: "1"
+    workload.keti.io/type: preprocessing
+    workload.keti.io/stage: preprocess
+    workload.keti.io/framework: pytorch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: preprocessing-pipeline-workload
+  template:
+    metadata:
+      labels:
+        app: preprocessing-pipeline-workload
+        stage: preprocess
+        gpuCount: "1"
+        workload.keti.io/type: preprocessing
+        workload.keti.io/stage: preprocess
+        workload.keti.io/framework: pytorch
+      annotations:
+        # mlops.keti.io/main-container 는 webhook이 insight-trace의 CONTAINER_NAME env를 결정할 때 사용.
+        mlops.keti.io/main-container: preprocess
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: preprocess
+          image: pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import json
+              import os
+              import time
+              import torch
+
+              base_dir = os.environ.get("PREPROCESS_DIR", "/data/preprocess")
+              os.makedirs(base_dir, exist_ok=True)
+              chunks_dir = os.path.join(base_dir, "chunks")
+              os.makedirs(chunks_dir, exist_ok=True)
+
+              cuda_available = torch.cuda.is_available()
+              cuda_device_count = torch.cuda.device_count() if cuda_available else 0
+              cuda_device_name = torch.cuda.get_device_name(0) if cuda_available else ""
+              device = "cuda" if cuda_available else "cpu"
+              print(f"main torch_version={torch.__version__}", flush=True)
+              print(
+                  f"main cuda_available={cuda_available} "
+                  f"cuda_device_count={cuda_device_count} "
+                  f"cuda_device_name={cuda_device_name!r}",
+                  flush=True,
+              )
+              print(f"main device={device}", flush=True)
+              print(f"main output_dir={base_dir}", flush=True)
+
+              # 결정성 확보용 seed 고정.
+              torch.manual_seed(42)
+              n_samples = 1024
+              feature_dim = 8
+              chunk_size = 128
+              x = torch.randn(n_samples, feature_dim, device=device)
+              y = (x.sum(dim=1) > 0).long()
+
+              num_chunks = n_samples // chunk_size
+              for i in range(num_chunks):
+                  start = i * chunk_size
+                  end = start + chunk_size
+                  chunk_path = os.path.join(chunks_dir, f"chunk-{i:03d}.pt")
+                  # torch.save는 CPU 텐서로 저장(파일 호환성 확보).
+                  torch.save(
+                      {"features": x[start:end].cpu(), "labels": y[start:end].cpu()},
+                      chunk_path,
+                  )
+                  print(
+                      f"main chunk {i} saved "
+                      f"features={list(x[start:end].shape)} "
+                      f"labels={list(y[start:end].shape)}",
+                      flush=True,
+                  )
+                  if i == 0:
+                      print(f"main chunk_path={chunk_path}", flush=True)
+
+              manifest = {
+                  "samples": int(n_samples),
+                  "chunks": int(num_chunks),
+                  "feature_dim": int(feature_dim),
+                  "framework": "pytorch",
+                  "torch_version": torch.__version__,
+                  "cuda_available": bool(cuda_available),
+                  "cuda_device_count": int(cuda_device_count),
+                  "cuda_device_name": cuda_device_name,
+                  "device": device,
+              }
+              manifest_path = os.path.join(base_dir, "manifest.json")
+              with open(manifest_path, "w") as fp:
+                  json.dump(manifest, fp, indent=2)
+              print(f"main manifest_path={manifest_path}", flush=True)
+              print(f"main manifest written: {manifest}", flush=True)
+              print("main complete", flush=True)
+
+              # Scenario 2 관측을 위해 Pod을 살려두는 heartbeat 루프.
+              while True:
+                  time.sleep(60)
+                  print("main heartbeat", flush=True)
+          env:
+            - name: PREPROCESS_DIR
+              value: /data/preprocess
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: preprocessing-pipeline-workload-data

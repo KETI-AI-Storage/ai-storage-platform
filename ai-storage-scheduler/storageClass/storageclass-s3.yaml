@@ -1,0 +1,18 @@
+# Gluesys S3 (Archive / Object Storage) tier StorageClass.
+# 용도: 백업, 오래된 로그, 결과 장기보관.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-s3
+  labels:
+    storage.keti.io/tier: S3
+    storage.keti.io/tier-role: object-archive
+    storage.keti.io/gluesys-tier: "true"
+provisioner: cluster.local/nfs-subdir-external-provisioner
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  tier: S3
+  tierRole: object-archive
+  dataClass: archive

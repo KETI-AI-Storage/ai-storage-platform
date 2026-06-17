@@ -1,0 +1,36 @@
+# =============================================================================
+# Kueue LocalQueue - 네임스페이스별 작업 큐
+# =============================================================================
+# LocalQueue는 특정 네임스페이스에서 ClusterQueue로 Job을 제출하는 진입점입니다.
+# 사용자는 Job을 제출할 때 LocalQueue를 지정합니다.
+# =============================================================================
+
+---
+# Kubeflow 사용자 네임스페이스용 LocalQueue
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: ai-storage-queue           # Job에서 참조할 이름
+  namespace: kubeflow-user-example-com
+spec:
+  clusterQueue: ai-storage-cluster-queue  # 연결할 ClusterQueue
+
+---
+# Default 네임스페이스용 LocalQueue (테스트용)
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: ai-storage-queue
+  namespace: default
+spec:
+  clusterQueue: ai-storage-cluster-queue
+
+---
+# Keti 네임스페이스용 LocalQueue
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: ai-storage-queue
+  namespace: keti
+spec:
+  clusterQueue: ai-storage-cluster-queue

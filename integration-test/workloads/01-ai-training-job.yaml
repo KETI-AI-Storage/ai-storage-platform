@@ -1,0 +1,124 @@
+# ============================================
+# AI Training Workload with Insight-Trace Sidecar
+# 이 워크로드는 ai-storage-scheduler로 스케줄링됨
+# ============================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llama-training-test
+  namespace: ai-workload-test
+  labels:
+    app: llama-training
+    workload-type: training
+    ai-model: llama
+    project: keti-ai-storage
+  annotations:
+    insight.keti.re.kr/enabled: "true"
+    insight.keti.re.kr/model: "llama-7b"
+    insight.keti.re.kr/framework: "pytorch"
+spec:
+  # Custom scheduler - ai-storage-scheduler
+  schedulerName: ai-storage-scheduler
+
+  # Tolerate control-plane taint for testing (remove in production)
+  tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+  # 프로세스 네임스페이스 공유 - 사이드카가 메인 컨테이너 프로세스를 볼 수 있음
+  shareProcessNamespace: true
+
+  containers:
+  # Main AI Training Container - 실제 Python 프로세스로 실행
+  - name: training
+    image: python:3.11-slim
+    command:
+    - python3
+    - -c
+    - |
+      import time
+      import sys
+      # 프로세스 이름에 pytorch/llm 키워드 포함
+      sys.argv[0] = 'llama_pytorch_trainer.py'
+      print("=== KETI AI Training (PyTorch LLaMA) ===")
+      print("Model: LLaMA-7B, Framework: PyTorch/Transformers")
+
+      stages = ["data_loading", "preprocessing", "training", "checkpoint"]
+      for stage in stages:
+          print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Stage: {stage}")
+          # I/O 시뮬레이션
+          with open(f'/tmp/stage_{stage}.bin', 'wb') as f:
+              f.write(b'0' * (10 * 1024 * 1024))  # 10MB
+          time.sleep(30)
+
+      print("Training complete!")
+      # 지속적으로 실행
+      while True:
+          time.sleep(60)
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+    volumeMounts:
+    - name: shared-data
+      mountPath: /data
+    - name: checkpoint
+      mountPath: /checkpoint
+
+  # Insight-Trace Sidecar
+  - name: insight-trace
+    image: ketidevit2/insight-trace:latest
+    imagePullPolicy: Always
+    env:
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+    - name: APOLLO_ENDPOINT
+      value: "apollo-policy-server.keti.svc.cluster.local:50051"
+    - name: SIDECAR_PORT
+      value: "9090"
+    - name: GRPC_PORT
+      value: "9091"
+    - name: METRICS_INTERVAL
+      value: "5s"
+    - name: ANALYSIS_INTERVAL
+      value: "10s"
+    - name: REPORT_INTERVAL
+      value: "30s"
+    ports:
+    - containerPort: 9090
+      name: http
+    - containerPort: 9091
+      name: grpc
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+    volumeMounts:
+    - name: shared-data
+      mountPath: /data
+      readOnly: true
+
+  volumes:
+  - name: shared-data
+    emptyDir: {}
+  - name: checkpoint
+    emptyDir: {}
+
+  restartPolicy: Never

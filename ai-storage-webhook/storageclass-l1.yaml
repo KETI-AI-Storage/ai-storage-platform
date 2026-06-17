@@ -1,0 +1,18 @@
+# Gluesys L1 (Cache / Burst Buffer) tier StorageClass.
+# 용도: 반복 접근, cache, metadata-cache, small I/O, ultra-low latency.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-l1
+  labels:
+    storage.keti.io/tier: L1
+    storage.keti.io/tier-role: cache-burst
+    storage.keti.io/gluesys-tier: "true"
+provisioner: cluster.local/nfs-subdir-external-provisioner
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  tier: L1
+  tierRole: cache-burst
+  dataClass: cache

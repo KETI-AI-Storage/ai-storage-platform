@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ope-model-verify
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: python-gpt-inference-verify-pvc
+  namespace: ope-model-verify
+  labels:
+    workload.keti.io/type: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: nfs-client
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-gpt-inference-verify
+  namespace: ope-model-verify
+  labels:
+    app: python-gpt-inference-verify
+    workload.keti.io/type: inference
+    ai-model: gpt-style
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: python-gpt-inference-verify
+  template:
+    metadata:
+      labels:
+        app: python-gpt-inference-verify
+        workload.keti.io/type: inference
+    spec:
+      containers:
+        - name: inference
+          image: python:3.11-slim
+          command:
+            - python3
+            - -c
+            - |
+              import os, sys, time, json, random
+              sys.argv[0] = "pytorch_gpt_inference_serve.py"
+              os.makedirs("/data/models", exist_ok=True)
+              os.makedirs("/data/results", exist_ok=True)
+              with open("/data/models/model.meta.json", "w") as f:
+                  json.dump({"model": "gpt-style", "framework": "pytorch"}, f)
+
+              print("=== scenario2: python gpt inference verify ===", flush=True)
+              req = 0
+              while True:
+                  req += 1
+                  token_len = random.randint(64, 512)
+                  latency_ms = random.randint(30, 180)
+                  with open(f"/data/results/infer_{req % 200}.json", "w") as out:
+                      out.write(
+                          json.dumps(
+                              {
+                                  "request_id": req,
+                                  "token_length": token_len,
+                                  "latency_ms": latency_ms
+                              }
+                          )
+                      )
+                  with open("/data/models/kv_cache.bin", "wb") as cachef:
+                      cachef.write(os.urandom(512 * 1024))
+                  time.sleep(5)
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: python-gpt-inference-verify-pvc

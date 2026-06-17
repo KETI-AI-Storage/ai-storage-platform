@@ -1,0 +1,114 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chunk-shard-preprocessing
+  namespace: ai-workload-test
+  labels:
+    app: chunk-shard-preprocessing
+    workload-type: preprocessing
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: chunk-shard-preprocessing
+        workload-type: preprocessing
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: preprocessing
+        image: python:3.11-slim
+        command:
+        - python3
+        - -c
+        - |
+          import json
+          import os
+          import random
+          import tarfile
+          import time
+          from pathlib import Path
+
+          base_dir = Path("/data")
+          input_path = base_dir / "input" / "dataset.txt"
+          chunks_dir = base_dir / "chunks"
+          shards_dir = base_dir / "shards"
+          index_dir = base_dir / "index"
+          for d in [input_path.parent, chunks_dir, shards_dir, index_dir]:
+              d.mkdir(parents=True, exist_ok=True)
+
+          # 입력 데이터가 없으면 샘플 데이터를 생성한다.
+          if not input_path.exists():
+              with input_path.open("w", encoding="utf-8") as f:
+                  for i in range(1, 101):
+                      f.write(f"record-{i:04d},value={random.randint(1, 1000)}\n")
+
+          lines = input_path.read_text(encoding="utf-8").splitlines()
+
+          chunk_size = int(os.getenv("CHUNK_SIZE", "10"))
+          shard_size = int(os.getenv("SHARD_SIZE", "5"))
+          object_prefix = os.getenv("OBJECT_PREFIX", "dataset/preprocess")
+
+          chunk_files = []
+          for i in range(0, len(lines), chunk_size):
+              chunk_lines = lines[i:i + chunk_size]
+              chunk_idx = len(chunk_files)
+              chunk_path = chunks_dir / f"chunk_{chunk_idx:04d}.bin"
+              chunk_path.write_text("\n".join(chunk_lines) + "\n", encoding="utf-8")
+              chunk_files.append(chunk_path)
+
+          shard_files = []
+          for i in range(0, len(chunk_files), shard_size):
+              shard_chunks = chunk_files[i:i + shard_size]
+              shard_idx = len(shard_files)
+              shard_path = shards_dir / f"shard_{shard_idx:04d}.tar"
+              with tarfile.open(shard_path, "w") as tar:
+                  for chunk in shard_chunks:
+                      tar.add(chunk, arcname=f"chunks/{chunk.name}")
+              shard_files.append(shard_path)
+
+          # train/val/test split과 object prefix를 인덱스로 남긴다.
+          splits = {"train": [], "val": [], "test": []}
+          for idx, shard in enumerate(shard_files):
+              ratio = idx / max(1, len(shard_files))
+              if ratio < 0.7:
+                  split = "train"
+              elif ratio < 0.9:
+                  split = "val"
+              else:
+                  split = "test"
+              splits[split].append({
+                  "shard_file": str(shard),
+                  "object_key": f"{object_prefix}/{shard.name}",
+              })
+
+          index = {
+              "generated_at_unix_ms": int(time.time() * 1000),
+              "input_path": str(input_path),
+              "chunk_count": len(chunk_files),
+              "shard_count": len(shard_files),
+              "chunk_size": chunk_size,
+              "shard_size": shard_size,
+              "object_prefix": object_prefix,
+              "splits": splits,
+          }
+          (index_dir / "metadata-index.json").write_text(
+              json.dumps(index, indent=2), encoding="utf-8"
+          )
+
+          print(f"chunks={len(chunk_files)} shards={len(shard_files)}")
+          print("saved:/data/chunks /data/shards /data/index/metadata-index.json")
+        env:
+        - name: CHUNK_SIZE
+          value: "10"
+        - name: SHARD_SIZE
+          value: "5"
+        - name: OBJECT_PREFIX
+          value: "ai-datasets/preprocessed"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+      volumes:
+      - name: data-volume
+        emptyDir:
+          sizeLimit: 1Gi

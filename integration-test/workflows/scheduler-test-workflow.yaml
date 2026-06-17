@@ -1,0 +1,159 @@
+# ============================================
+# AI Storage Scheduler Test Workflow
+# 스케줄러 플러그인 테스트 워크플로우
+# ============================================
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: scheduler-test-
+  namespace: default
+spec:
+  entrypoint: scheduler-test-pipeline
+
+  # 서비스 어카운트 (Argo에서 Pod 생성 권한)
+  serviceAccountName: argo-workflow
+
+  templates:
+  # ============================================
+  # Main Pipeline
+  # ============================================
+  - name: scheduler-test-pipeline
+    dag:
+      tasks:
+      # Step 1: 전처리 유형별 테스트 (병렬)
+      - name: test-augmentation
+        template: preprocessing-job
+        arguments:
+          parameters:
+          - name: preprocessing-type
+            value: augmentation
+          - name: io-pattern
+            value: write-heavy
+
+      - name: test-filtering
+        template: preprocessing-job
+        arguments:
+          parameters:
+          - name: preprocessing-type
+            value: filtering
+          - name: io-pattern
+            value: read-heavy
+
+      - name: test-transformation
+        template: preprocessing-job
+        arguments:
+          parameters:
+          - name: preprocessing-type
+            value: transformation
+          - name: io-pattern
+            value: balanced
+
+      # Step 2: 결과 검증 (병렬 테스트 완료 후)
+      - name: verify-scheduling
+        template: verify-results
+        dependencies: [test-augmentation, test-filtering, test-transformation]
+
+  # ============================================
+  # Preprocessing Job Template
+  # ============================================
+  - name: preprocessing-job
+    inputs:
+      parameters:
+      - name: preprocessing-type
+      - name: io-pattern
+    metadata:
+      labels:
+        workload-type: preprocessing
+        preprocessing-type: "{{inputs.parameters.preprocessing-type}}"
+      annotations:
+        ai-storage.keti/preprocessing-type: "{{inputs.parameters.preprocessing-type}}"
+        ai-storage.keti/io-pattern: "{{inputs.parameters.io-pattern}}"
+        ai-storage.keti/workload-stage: "preprocessing"
+        insight.keti.re.kr/enabled: "true"
+    # Use custom scheduler
+    schedulerName: ai-storage-scheduler
+    tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    container:
+      image: python:3.11-slim
+      command: [python3, -c]
+      args:
+      - |
+        import time
+        import os
+
+        ptype = "{{inputs.parameters.preprocessing-type}}"
+        io_pattern = "{{inputs.parameters.io-pattern}}"
+        node = os.environ.get('NODE_NAME', 'unknown')
+
+        print(f"=" * 50)
+        print(f"KETI Scheduler Test - {ptype.upper()}")
+        print(f"=" * 50)
+        print(f"Preprocessing Type: {ptype}")
+        print(f"I/O Pattern: {io_pattern}")
+        print(f"Scheduled Node: {node}")
+        print(f"=" * 50)
+
+        # Simulate preprocessing work
+        stages = {
+            "augmentation": ["load", "rotate", "flip", "crop", "save"],
+            "filtering": ["load", "validate", "filter", "output"],
+            "transformation": ["load", "normalize", "convert", "save"]
+        }
+
+        for i, stage in enumerate(stages.get(ptype, ["process"])):
+            print(f"[{time.strftime('%H:%M:%S')}] Stage {i+1}: {stage}")
+            # I/O simulation
+            with open(f'/tmp/{stage}.bin', 'wb') as f:
+                f.write(b'X' * (5 * 1024 * 1024))  # 5MB
+            time.sleep(5)
+
+        print(f"[{time.strftime('%H:%M:%S')}] {ptype} completed on node: {node}")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "200m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+
+  # ============================================
+  # Verify Results Template
+  # ============================================
+  - name: verify-results
+    container:
+      image: bitnami/kubectl:latest
+      command: ["/bin/sh", "-c"]
+      args:
+      - |
+        echo "============================================"
+        echo "Scheduler Test Results Verification"
+        echo "============================================"
+
+        echo ""
+        echo "1. AIStorageConfig CRD Status:"
+        kubectl get aistorageconfig -n keti -o wide
+
+        echo ""
+        echo "2. Scheduler Pod Status:"
+        kubectl get pods -n keti -l app=ai-storage-scheduler
+
+        echo ""
+        echo "3. Scheduler Logs (last 20 lines):"
+        kubectl logs -n keti -l app=ai-storage-scheduler --tail=20
+
+        echo ""
+        echo "4. APOLLO Status:"
+        kubectl get pods -n keti -l app=apollo-policy-server
+
+        echo ""
+        echo "============================================"
+        echo "Test Completed Successfully!"
+        echo "============================================"

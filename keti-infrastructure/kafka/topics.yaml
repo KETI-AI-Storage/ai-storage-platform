@@ -1,0 +1,58 @@
+# KETI Kafka Topics
+# Topics for AI Storage System metrics and events
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: gpu-metrics
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: keti-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 604800000  # 7 days
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: storage-metrics
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: keti-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 604800000
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: pod-events
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: keti-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 259200000  # 3 days
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: scheduling-decisions
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: keti-kafka
+spec:
+  partitions: 1
+  replicas: 1
+  config:
+    retention.ms: 604800000
+    cleanup.policy: delete

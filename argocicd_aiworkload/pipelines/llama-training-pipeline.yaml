@@ -1,0 +1,168 @@
+###############################################################################
+# LLaMA Training Pipeline (Kubeflow/Argo Workflow)
+# DAG: 데이터전처리 → 모델학습 → 모델평가
+# AI Storage Scheduler 사용
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: llama-training-pipeline
+  namespace: kubeflow-user-example-com
+  labels:
+    app: llama-pipeline
+    workload-type: text
+    framework: pytorch
+spec:
+  entrypoint: llama-pipeline
+  serviceAccountName: default-editor
+
+  # 공유 볼륨 (emptyDir - 노드 로컬)
+  volumes:
+  - name: pipeline-data
+    emptyDir:
+      sizeLimit: 500Mi
+
+  # DAG 정의
+  templates:
+  - name: llama-pipeline
+    dag:
+      tasks:
+      - name: preprocess
+        template: preprocess-step
+      - name: train
+        template: train-step
+        dependencies: [preprocess]
+      - name: evaluate
+        template: evaluate-step
+        dependencies: [train]
+
+  # Step 1: 데이터 전처리
+  - name: preprocess-step
+    metadata:
+      labels:
+        pipeline-step: preprocess
+      annotations:
+        ai-storage.keti/preprocessing-type: "transformation"
+        ai-storage.keti/io-pattern: "write-heavy"
+    schedulerName: ai-storage-scheduler
+    tolerations:
+    - operator: Exists
+    container:
+      image: python:3.11-slim
+      command: [python3, -c]
+      args:
+      - |
+        import time, os
+        node = os.environ.get('NODE_NAME', 'unknown')
+        print("=" * 50)
+        print("[STEP 1/3] Data Preprocessing")
+        print(f"Node: {node}")
+        print("=" * 50)
+        os.makedirs('/data/tokens', exist_ok=True)
+        for i, stage in enumerate(['load', 'tokenize', 'batch', 'save']):
+            print(f"[{time.strftime('%H:%M:%S')}] {stage}...")
+            with open(f'/data/{stage}.bin', 'wb') as f:
+                f.write(os.urandom(2*1024*1024))
+            time.sleep(10)
+        with open('/data/tokens/data.bin', 'wb') as f:
+            f.write(os.urandom(5*1024*1024))
+        print("[STEP 1/3] DONE!")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data
+
+  # Step 2: 모델 학습
+  - name: train-step
+    metadata:
+      labels:
+        pipeline-step: train
+      annotations:
+        ai-storage.keti/preprocessing-type: "aggregation"
+        ai-storage.keti/io-pattern: "balanced"
+    schedulerName: ai-storage-scheduler
+    tolerations:
+    - operator: Exists
+    container:
+      image: python:3.11-slim
+      command: [python3, -c]
+      args:
+      - |
+        import time, os, random
+        node = os.environ.get('NODE_NAME', 'unknown')
+        print("=" * 50)
+        print("[STEP 2/3] Model Training")
+        print(f"Node: {node}")
+        print("=" * 50)
+        os.makedirs('/data/checkpoints', exist_ok=True)
+        for epoch in range(2):
+            print(f"Epoch {epoch+1}/2")
+            for step in range(3):
+                loss = 2.0 - epoch*0.3 - step*0.1 + random.uniform(-0.05, 0.05)
+                print(f"  Step {step+1}: loss={loss:.4f}")
+                time.sleep(5)
+        with open('/data/checkpoints/model.pt', 'wb') as f:
+            f.write(os.urandom(5*1024*1024))
+        print("[STEP 2/3] DONE!")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "200m"
+          memory: "256Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data
+
+  # Step 3: 모델 평가
+  - name: evaluate-step
+    metadata:
+      labels:
+        pipeline-step: evaluate
+      annotations:
+        ai-storage.keti/preprocessing-type: "filtering"
+        ai-storage.keti/io-pattern: "read-heavy"
+    schedulerName: ai-storage-scheduler
+    tolerations:
+    - operator: Exists
+    container:
+      image: python:3.11-slim
+      command: [python3, -c]
+      args:
+      - |
+        import time, os, random, json
+        node = os.environ.get('NODE_NAME', 'unknown')
+        print("=" * 50)
+        print("[STEP 3/3] Model Evaluation")
+        print(f"Node: {node}")
+        print("=" * 50)
+        for i in range(3):
+            print(f"Evaluating batch {i+1}/3...")
+            time.sleep(5)
+        metrics = {'accuracy': random.uniform(0.8, 0.95), 'loss': random.uniform(0.1, 0.3)}
+        print(f"Results: {metrics}")
+        print("=" * 50)
+        print("PIPELINE COMPLETED!")
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      volumeMounts:
+      - name: pipeline-data
+        mountPath: /data

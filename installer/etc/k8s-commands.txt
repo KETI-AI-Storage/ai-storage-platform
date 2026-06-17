@@ -1,0 +1,11 @@
+[워커노드 조인]
+($ kubeadm token create --print-join-command #master에서 수행)
+$ kubectl join ~~
+
+[master node 스케줄링 허용]
+$ kubectl taint nodes management-master node-role.kubernetes.io/control-plane-
+
+[노드 라벨 설정]
+$ kubectl get nodes --show-labels
+$ kubectl label nodes management-master key=master
+$ kubectl label nodes instance-worker key=worker

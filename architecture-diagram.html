@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KETI AI Storage Platform - Architecture</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            background: #0d1117;
+            color: #c9d1d9;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            color: #58a6ff;
+            font-size: 28px;
+            margin-bottom: 5px;
+        }
+        h2 {
+            text-align: center;
+            color: #8b949e;
+            font-size: 14px;
+            font-weight: normal;
+            margin-top: 0;
+        }
+        .mermaid {
+            display: flex;
+            justify-content: center;
+            margin: 20px auto;
+            max-width: 100%;
+            overflow-x: auto;
+        }
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            flex-wrap: wrap;
+            margin: 15px 0;
+            font-size: 13px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+        }
+        .section-title {
+            text-align: center;
+            color: #58a6ff;
+            font-size: 20px;
+            margin-top: 50px;
+            border-top: 1px solid #30363d;
+            padding-top: 30px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>KETI Intelligent Orchestration Platform</h1>
+<h2>Adaptive Policy Optimization for Low-Latency I/O (APOLLO) + AI Storage System</h2>
+<h2>IITP Grant No. RS-2024-00461572 | "AI 연산 가속기 최적화 고효율 병렬 스토리지 SW기술 개발"</h2>
+
+<div class="legend">
+    <div class="legend-item"><div class="legend-color" style="background:#1f6feb"></div> Pipeline (CI/CD & Queue)</div>
+    <div class="legend-item"><div class="legend-color" style="background:#da3633"></div> APOLLO (AI Policy Engines)</div>
+    <div class="legend-item"><div class="legend-color" style="background:#238636"></div> AI-Storage (Scheduler & Orchestrator)</div>
+    <div class="legend-item"><div class="legend-color" style="background:#9e6a03"></div> Monitoring (Insight Scope/Trace)</div>
+    <div class="legend-item"><div class="legend-color" style="background:#8b949e"></div> Kubernetes Infrastructure</div>
+</div>
+
+<!-- ============================================ -->
+<!-- DIAGRAM 1: Full System Architecture          -->
+<!-- ============================================ -->
+<div class="mermaid">
+%%{init: {'theme': 'dark', 'themeVariables': {'fontSize': '14px'}, 'flowchart': {'htmlLabels': true, 'curve': 'basis', 'nodeSpacing': 30, 'rankSpacing': 50}}}%%
+flowchart TB
+
+    %% ============================================
+    %% PIPELINE LAYER
+    %% ============================================
+    subgraph PIPELINE["<b>KETI 지능형 오케스트레이션 Pipeline</b>"]
+        direction LR
+        ARGOCD["<b>Argo CD</b><br/><i>GitOps CI/CD</i><br/>ns: argocd"]
+        KUBEFLOW["<b>Kubeflow</b><br/><i>ML Pipeline</i><br/>TFJob / PyTorchJob"]
+        KUEUE["<b>Kueue</b><br/><i>Job Queue Mgmt</i><br/>ResourceFlavor"]
+        ARGOCD --> KUBEFLOW
+        KUBEFLOW --> KUEUE
+    end
+
+    %% ============================================
+    %% KUBERNETES CORE
+    %% ============================================
+    subgraph K8S_CORE["<b>Kubernetes Control Plane</b>"]
+        direction LR
+        APISERVER["<b>kube-apiserver</b><br/>REST API Gateway"]
+        ETCD[("<b>etcd</b><br/>Cluster State")]
+        APISERVER <--> ETCD
+    end
+
+    %% ============================================
+    %% APOLLO LAYER
+    %% ============================================
+    subgraph APOLLO["<b>APOLLO</b> &mdash; Adaptive Policy Optimization for Low-Latency I/O<br/><i>ns: apollo + keti</i>"]
+        direction TB
+
+        subgraph APOLLO_FORECAST["<b>Node Resource Forecaster</b><br/><i>ns: apollo | HTTP:8080 gRPC:50055</i>"]
+            direction TB
+            LSTM["<b>LSTM Model</b><br/>시계열 예측"]
+            HISTORY["SubmitHistoryData<br/>노드별 메트릭 수집"]
+            PREDICT["노드별 리소스 예측<br/>5 / 15 / 30 / 60분"]
+            HISTORY --> LSTM --> PREDICT
+        end
+
+        subgraph APOLLO_ORCH_POLICY["<b>Orchestration Policy Engine</b><br/><i>ns: apollo | HTTP:9092 gRPC:50056</i>"]
+            direction TB
+            POLICY_GEN["<b>Policy Generator</b><br/>60초 주기<br/>Workload 노드 분석"]
+            POLICY_CRD["<b>OrchestrationPolicy CRD</b><br/>migration / scaling<br/>provisioning / caching<br/>loadbalance / preemption"]
+            POLICY_CTRL["<b>Policy Controller</b><br/>Reconcile Loop<br/>AutoExecute"]
+            POLICY_GEN --> POLICY_CRD --> POLICY_CTRL
+        end
+
+        subgraph APOLLO_SCHED_POLICY["<b>Scheduling Policy Engine</b><br/><i>ns: apollo | HTTP:9090 gRPC:50054</i>"]
+            direction TB
+            PPO["<b>PPO RL Agent</b><br/>스케줄링 정책 최적화"]
+        end
+
+        subgraph APOLLO_SERVER["<b>APOLLO Policy Server</b><br/><i>ns: keti | HTTP:8080 gRPC:50051</i>"]
+            direction TB
+            WS_AGG["WorkloadSignature<br/>Aggregator"]
+            CI_AGG["ClusterInsight<br/>Aggregator"]
+        end
+    end
+
+    %% ============================================
+    %% AI-STORAGE LAYER
+    %% ============================================
+    subgraph AI_STORAGE["<b>AI-Storage System</b>"]
+        direction TB
+
+        subgraph SCHEDULER["<b>AI-Storage Scheduler</b><br/><i>ns: keti | gRPC:50053</i>"]
+            direction TB
+            SCHED_QUEUE["SchedulingQueue<br/>(Priority Heap)"]
+            SCHED_FILTER["<b>Filter</b><br/>NodeResourcesFit<br/>CSD / GPU Check"]
+            SCHED_SCORE["<b>Score</b><br/>LeastAllocated<br/>+ APOLLO Policy Weight"]
+            SCHED_BIND["<b>Bind</b><br/>DefaultBinder"]
+            SCHED_QUEUE --> SCHED_FILTER --> SCHED_SCORE --> SCHED_BIND
+        end
+
+        subgraph ORCHESTRATOR["<b>AI-Storage Orchestrator</b><br/><i>ns: kube-system | HTTP:8080</i>"]
+            direction LR
+            OP_MIG["<b>Migration</b><br/>Operator"]
+            OP_SCALE["<b>AutoScaling</b><br/>Operator"]
+            OP_LB["<b>Loadbalance</b><br/>Operator"]
+            OP_CACHE["<b>Caching</b><br/>Operator"]
+            OP_PROV["<b>Provision</b><br/>Operator"]
+            OP_PREEMPT["<b>Preemption</b><br/>Operator"]
+        end
+
+        subgraph METRIC_COL["<b>AI-Storage Metric Collector</b><br/><i>ns: monitoring | DaemonSet | :2112</i>"]
+            PROM_EXP["Prometheus Exporter<br/>/metrics"]
+        end
+    end
+
+    %% ============================================
+    %% MONITORING LAYER
+    %% ============================================
+    subgraph MONITORING["<b>Monitoring & Observability</b>"]
+        direction TB
+
+        subgraph INSIGHT_SCOPE["<b>Insight Scope</b><br/><i>ns: keti | DaemonSet</i><br/>HTTP:9092 gRPC:50054"]
+            direction TB
+            SCOPE_ANALYZE["Pod 분석<br/>AI Model Profile"]
+            SCOPE_RECOMMEND["Storage 추천<br/>CSD / NVMe / SSD"]
+            SCOPE_METRICS["노드 메트릭 수집<br/>CPU/Mem/GPU/IO"]
+        end
+
+        subgraph INSIGHT_TRACE["<b>Insight Trace</b><br/><i>Sidecar Container</i><br/>HTTP:9090"]
+            direction TB
+            TRACE_COLLECT["워크로드 시그니처 수집<br/>5초 주기 메트릭<br/>30초 주기 리포트"]
+            TRACE_REPORT["Orchestrator 리포트<br/>POST /insight/report"]
+        end
+
+        subgraph PROM_GRAF["<b>Prometheus + Grafana</b><br/><i>ns: monitoring</i>"]
+            direction LR
+            PROMETHEUS["<b>Prometheus</b><br/>:9090"]
+            GRAFANA["<b>Grafana</b><br/>Dashboard"]
+            PROMETHEUS --> GRAFANA
+        end
+
+        subgraph DCGM["<b>DCGM Exporter</b><br/><i>ns: gpu-monitoring | DaemonSet</i><br/>:9400"]
+            GPU_METRICS["NVIDIA GPU Metrics"]
+        end
+    end
+
+    %% ============================================
+    %% WORKER NODES
+    %% ============================================
+    subgraph NODES["<b>Cluster Nodes</b>"]
+        direction LR
+        subgraph NODE1["<b>ai-storage-master</b><br/><i>layer: orchestration</i><br/>Control Plane"]
+            N1_SCOPE["Insight Scope"]
+            N1_METRIC["Metric Collector"]
+        end
+        subgraph NODE2["<b>ai-storage-worker-01</b><br/><i>layer: compute</i><br/>Worker"]
+            N2_SCOPE["Insight Scope"]
+            N2_METRIC["Metric Collector"]
+            N2_PODS["AI Workload Pods<br/>+ Insight Trace Sidecar"]
+        end
+        subgraph NODE3["<b>gpu-server-03</b><br/><i>layer: compute</i><br/>GPU Worker"]
+            N3_SCOPE["Insight Scope"]
+            N3_METRIC["Metric Collector"]
+            N3_DCGM["DCGM Exporter"]
+            N3_PODS["GPU Workload Pods<br/>+ Insight Trace Sidecar"]
+        end
+        subgraph NODE4["<b>csd-server-01</b><br/><i>layer: storage</i><br/>CSD Worker"]
+            N4_SCOPE["Insight Scope"]
+            N4_METRIC["Metric Collector"]
+            N4_CSD["CSD Device"]
+            N4_PODS["Storage Workload Pods<br/>+ Insight Trace Sidecar"]
+        end
+    end
+
+    %% ============================================
+    %% KUEUE RESOURCES
+    %% ============================================
+    subgraph KUEUE_RES["<b>Kueue Resources</b>"]
+        direction LR
+        RF_DEFAULT["<b>default-flavor</b><br/>CPU:16 / Mem:32Gi"]
+        RF_GPU["<b>gpu-flavor</b><br/>CPU:32 / Mem:64Gi<br/>GPU: nvidia.com/gpu"]
+        RF_CSD["<b>csd-flavor</b><br/>CPU:8 / Mem:64Gi<br/>CSD: csd.enabled"]
+        CQ["<b>ClusterQueue</b><br/>ai-storage-cluster-queue<br/>BestEffortFIFO"]
+        RF_DEFAULT --> CQ
+        RF_GPU --> CQ
+        RF_CSD --> CQ
+    end
+
+    %% ============================================
+    %% CONNECTIONS (Data Flow)
+    %% ============================================
+
+    %% Pipeline → K8s
+    PIPELINE --> APISERVER
+    KUEUE --> CQ
+
+    %% K8s Core → Components
+    APISERVER --> SCHEDULER
+    APISERVER --> ORCHESTRATOR
+
+    %% Scheduler ↔ APOLLO
+    SCHED_SCORE -.->|"gRPC:50051<br/>스케줄링 정책 요청"| APOLLO_SERVER
+    APOLLO_SERVER -.->|"gRPC:50054<br/>PPO 정책 추론"| PPO
+
+    %% Forecaster → Policy Generator
+    PREDICT -.->|"HTTP:8080<br/>예측 결과 조회"| POLICY_GEN
+
+    %% Policy Controller → Orchestrator
+    POLICY_CTRL -.->|"HTTP:8080<br/>정책 실행 요청"| ORCHESTRATOR
+
+    %% Insight Scope → Forecaster
+    SCOPE_METRICS -.->|"gRPC:50055<br/>메트릭 전송"| HISTORY
+
+    %% Insight Trace → Orchestrator & APOLLO
+    TRACE_REPORT -.->|"HTTP:8080<br/>시그니처 전송"| WS_AGG
+    TRACE_REPORT -.->|"HTTP:8080<br/>인사이트 리포트"| ORCHESTRATOR
+
+    %% Metrics → Prometheus
+    PROM_EXP -.->|":2112/metrics"| PROMETHEUS
+    GPU_METRICS -.->|":9400/metrics"| PROMETHEUS
+
+    %% Migration flow
+    OP_MIG -.->|"Pod Migration<br/>PV Checkpoint"| APISERVER
+
+    %% Bind
+    SCHED_BIND -.->|"Bind Pod → Node"| APISERVER
+
+    %% Style classes
+    classDef pipeline fill:#1f3d5e,stroke:#1f6feb,stroke-width:2px,color:#fff
+    classDef apollo fill:#3d1e1e,stroke:#da3633,stroke-width:2px,color:#fff
+    classDef aistorage fill:#1e3d1e,stroke:#238636,stroke-width:2px,color:#fff
+    classDef monitoring fill:#3d3019,stroke:#9e6a03,stroke-width:2px,color:#fff
+    classDef k8s fill:#21262d,stroke:#8b949e,stroke-width:2px,color:#c9d1d9
+    classDef node fill:#161b22,stroke:#30363d,stroke-width:1px,color:#8b949e
+
+    class ARGOCD,KUBEFLOW,KUEUE pipeline
+    class LSTM,HISTORY,PREDICT,POLICY_GEN,POLICY_CRD,POLICY_CTRL,PPO,WS_AGG,CI_AGG apollo
+    class SCHED_QUEUE,SCHED_FILTER,SCHED_SCORE,SCHED_BIND,OP_MIG,OP_SCALE,OP_LB,OP_CACHE,OP_PROV,OP_PREEMPT,PROM_EXP aistorage
+    class SCOPE_ANALYZE,SCOPE_RECOMMEND,SCOPE_METRICS,TRACE_COLLECT,TRACE_REPORT,PROMETHEUS,GRAFANA,GPU_METRICS monitoring
+    class APISERVER,ETCD k8s
+    class N1_SCOPE,N1_METRIC,N2_SCOPE,N2_METRIC,N2_PODS,N3_SCOPE,N3_METRIC,N3_DCGM,N3_PODS,N4_SCOPE,N4_METRIC,N4_CSD,N4_PODS node
+    class RF_DEFAULT,RF_GPU,RF_CSD,CQ pipeline
+</div>
+
+<!-- ============================================ -->
+<!-- DIAGRAM 2: Data Flow Sequence               -->
+<!-- ============================================ -->
+<div class="section-title">E2E Data Flow: 예측 기반 자동 오케스트레이션</div>
+
+<div class="mermaid">
+%%{init: {'theme': 'dark', 'themeVariables': {'fontSize': '13px'}, 'sequence': {'actorMargin': 20, 'messageMargin': 15}}}%%
+sequenceDiagram
+    participant IS as Insight Scope<br/>(DaemonSet)
+    participant IT as Insight Trace<br/>(Sidecar)
+    participant NRF as Node Resource<br/>Forecaster<br/>(LSTM)
+    participant PG as Policy<br/>Generator<br/>(60s 주기)
+    participant CRD as Orchestration<br/>Policy CRD
+    participant PC as Policy<br/>Controller
+    participant ORCH as AI-Storage<br/>Orchestrator
+    participant K8S as kube-apiserver
+
+    Note over IS,K8S: Phase 1: 메트릭 수집 (Continuous)
+    IS->>NRF: gRPC:50055 SubmitHistoryData<br/>(CPU, Memory, GPU, Storage I/O)
+    IT->>ORCH: HTTP POST /api/v1/insight/report<br/>(워크로드 시그니처)
+
+    Note over IS,K8S: Phase 2: 예측 & 정책 생성 (Every 60s)
+    PG->>NRF: HTTP GET /api/v1/forecast/node/{name}<br/>(노드 리소스 예측 요청)
+    NRF-->>PG: 예측 결과 (5/15/30/60분)<br/>CPU:85%, Memory:90% 예측
+    PG->>PG: AnalyzeAndRecommend()<br/>임계값 초과 분석
+    PG->>CRD: Create OrchestrationPolicy<br/>type:migration, urgency:CRITICAL<br/>autoExecute:true
+
+    Note over IS,K8S: Phase 3: 정책 자동 실행
+    CRD-->>PC: Reconcile Event (Watch)
+    PC->>PC: Phase: Pending → Approved<br/>(AutoApproved)
+    PC->>ORCH: HTTP POST /api/v1/migrations<br/>{sourceNode, targetNode, podName}
+
+    Note over IS,K8S: Phase 4: 마이그레이션 실행
+    ORCH->>K8S: 1. Get Pod (컨테이너 상태 분석)
+    K8S-->>ORCH: running/completed/failed 분류
+    ORCH->>K8S: 2. Create PVC Checkpoint
+    ORCH->>K8S: 3. Create Optimized Pod<br/>(running 컨테이너만 포함)
+    ORCH->>K8S: 4. Delete Original Pod<br/>(30s gracePeriod)
+    ORCH-->>PC: Migration Completed
+
+    Note over IS,K8S: Phase 5: 결과 기록
+    PC->>CRD: Update Phase: Completed<br/>CPU 50%↓, Memory 40%↓
+</div>
+
+<!-- ============================================ -->
+<!-- DIAGRAM 3: Scheduling Flow                  -->
+<!-- ============================================ -->
+<div class="section-title">AI-Storage Scheduler: 지능형 스케줄링 플로우</div>
+
+<div class="mermaid">
+%%{init: {'theme': 'dark', 'themeVariables': {'fontSize': '13px'}, 'sequence': {'actorMargin': 20}}}%%
+sequenceDiagram
+    participant POD as New Pod<br/>(schedulerName:<br/>ai-storage-scheduler)
+    participant SQ as Scheduling<br/>Queue
+    participant SCHED as AI-Storage<br/>Scheduler
+    participant APOLLO as APOLLO<br/>Policy Server
+    participant SPE as Scheduling<br/>Policy Engine<br/>(PPO RL)
+    participant K8S as kube-apiserver
+
+    POD->>SQ: Pod Informer 감지<br/>(Unscheduled Pod)
+    SQ->>SCHED: ScheduleOne()
+
+    Note over SCHED: GPU Pod인 경우
+    SCHED->>SCHED: refreshStaleGPUMetrics()<br/>(60s 이상된 메트릭 갱신)
+
+    SCHED->>APOLLO: gRPC:50051<br/>GetSchedulingPolicy()
+    APOLLO->>SPE: gRPC:50054<br/>PPO 정책 추론
+    SPE-->>APOLLO: Plugin Weights<br/>{NodeResourcesFit: 0.4,<br/>LeastAllocated: 0.3,<br/>CSD: 0.3}
+    APOLLO-->>SCHED: SchedulingPolicy
+
+    Note over SCHED: Filter Phase
+    SCHED->>SCHED: NodeResourcesFit.Filter()<br/>CPU/Memory 충분한 노드만
+
+    Note over SCHED: Score Phase
+    SCHED->>SCHED: LeastAllocated.Score()<br/>+ CSD/GPU Score<br/>가중치 적용
+
+    Note over SCHED: Select Best Node
+    SCHED->>SCHED: selectHost()<br/>최고 점수 노드 선택
+
+    SCHED->>SCHED: assume()<br/>캐시 낙관적 업데이트
+
+    Note over SCHED: Bind Phase (Async)
+    SCHED->>K8S: DefaultBinder.Bind()<br/>Create Binding Resource
+    K8S-->>POD: Pod Scheduled ✓
+</div>
+
+<!-- ============================================ -->
+<!-- DIAGRAM 4: Component Namespace Map          -->
+<!-- ============================================ -->
+<div class="section-title">Namespace & Component Map</div>
+
+<div class="mermaid">
+%%{init: {'theme': 'dark', 'themeVariables': {'fontSize': '12px'}}}%%
+graph LR
+    subgraph NS_ARGOCD["<b>ns: argocd</b>"]
+        A1["Argo CD Server"]
+        A2["App-of-Apps<br/>keti-ai-storage-platform"]
+    end
+
+    subgraph NS_APOLLO["<b>ns: apollo</b>"]
+        B1["Scheduling Policy Engine<br/>PPO RL | :9090/:50054"]
+        B2["Node Resource Forecaster<br/>LSTM | :8080/:50055"]
+        B3["Orchestration Policy Engine<br/>DQN RL | :9092/:50056"]
+        B4["OrchestrationPolicy CRDs"]
+    end
+
+    subgraph NS_KETI["<b>ns: keti</b>"]
+        C1["AI-Storage Scheduler<br/>:50053"]
+        C2["APOLLO Policy Server<br/>:8080/:50051"]
+        C3["APOLLO Forecaster<br/>:8081/:50052"]
+        C4["Insight Scope<br/>DaemonSet | :9092/:50054"]
+        C5["Insight Trace<br/>Sidecar ConfigMap"]
+        C6["Kueue LocalQueue"]
+    end
+
+    subgraph NS_KUBESYS["<b>ns: kube-system</b>"]
+        D1["AI-Storage Orchestrator<br/>:8080 | HPA 1→3"]
+        D2["Migration Operator"]
+        D3["AutoScaling Operator"]
+        D4["Loadbalance Operator"]
+        D5["Caching Operator"]
+        D6["Provision Operator"]
+        D7["Preemption Operator"]
+    end
+
+    subgraph NS_MONITOR["<b>ns: monitoring</b>"]
+        E1["AI-Storage Metric Collector<br/>DaemonSet | :2112"]
+        E2["Prometheus | :9090"]
+        E3["Grafana"]
+    end
+
+    subgraph NS_GPU["<b>ns: gpu-monitoring</b>"]
+        F1["DCGM Exporter<br/>DaemonSet | :9400"]
+    end
+
+    A2 -.-> NS_APOLLO
+    A2 -.-> NS_KETI
+    B3 --> D1
+    C1 --> C2
+    C2 --> B1
+    C4 --> B2
+    E1 --> E2
+    F1 --> E2
+    E2 --> E3
+
+    classDef argocd fill:#1f3d5e,stroke:#1f6feb,color:#fff
+    classDef apollo fill:#3d1e1e,stroke:#da3633,color:#fff
+    classDef keti fill:#1e3d2e,stroke:#238636,color:#fff
+    classDef kubesys fill:#1e2d3e,stroke:#388bfd,color:#fff
+    classDef monitor fill:#3d3019,stroke:#9e6a03,color:#fff
+    classDef gpu fill:#2d1e3d,stroke:#8957e5,color:#fff
+
+    class A1,A2 argocd
+    class B1,B2,B3,B4 apollo
+    class C1,C2,C3,C4,C5,C6 keti
+    class D1,D2,D3,D4,D5,D6,D7 kubesys
+    class E1,E2,E3 monitor
+    class F1 gpu
+</div>
+
+<!-- ============================================ -->
+<!-- DIAGRAM 5: Kueue Resource Flow              -->
+<!-- ============================================ -->
+<div class="section-title">Kueue Resource Management</div>
+
+<div class="mermaid">
+%%{init: {'theme': 'dark', 'themeVariables': {'fontSize': '13px'}}}%%
+flowchart LR
+    subgraph WORKLOADS["<b>AI Workloads</b>"]
+        W1["TFJob<br/>(TensorFlow)"]
+        W2["PyTorchJob<br/>(PyTorch)"]
+        W3["Batch Job<br/>(Data Pipeline)"]
+    end
+
+    subgraph LOCAL_QUEUES["<b>LocalQueues</b>"]
+        LQ1["kubeflow-user/<br/>ai-storage-queue"]
+        LQ2["default/<br/>ai-storage-queue"]
+        LQ3["keti/<br/>ai-storage-queue"]
+    end
+
+    subgraph CLUSTER_QUEUE["<b>ClusterQueue</b><br/>ai-storage-cluster-queue<br/>Strategy: BestEffortFIFO"]
+        CQ_PROCESS["Preemption:<br/>WithinClusterQueue<br/>LowerPriority"]
+    end
+
+    subgraph FLAVORS["<b>ResourceFlavors</b>"]
+        RF1["<b>default-flavor</b><br/>CPU: 16<br/>Memory: 32Gi<br/>label: worker"]
+        RF2["<b>gpu-flavor</b><br/>CPU: 32<br/>Memory: 64Gi<br/>GPU: nvidia.com/gpu<br/>label: gpu"]
+        RF3["<b>csd-flavor</b><br/>CPU: 8<br/>Memory: 64Gi<br/>CSD: csd.enabled<br/>label: storage"]
+    end
+
+    subgraph TARGET_NODES["<b>Target Nodes</b>"]
+        TN1["ai-storage-worker-01<br/>Compute"]
+        TN2["gpu-server-03<br/>GPU"]
+        TN3["csd-server-01<br/>CSD Storage"]
+    end
+
+    W1 --> LQ1
+    W2 --> LQ1
+    W3 --> LQ2
+
+    LQ1 --> CQ_PROCESS
+    LQ2 --> CQ_PROCESS
+    LQ3 --> CQ_PROCESS
+
+    CQ_PROCESS --> RF1
+    CQ_PROCESS --> RF2
+    CQ_PROCESS --> RF3
+
+    RF1 --> TN1
+    RF2 --> TN2
+    RF3 --> TN3
+
+    classDef workload fill:#1f3d5e,stroke:#1f6feb,color:#fff
+    classDef queue fill:#3d1e1e,stroke:#da3633,color:#fff
+    classDef flavor fill:#1e3d1e,stroke:#238636,color:#fff
+    classDef node fill:#21262d,stroke:#8b949e,color:#c9d1d9
+
+    class W1,W2,W3 workload
+    class LQ1,LQ2,LQ3,CQ_PROCESS queue
+    class RF1,RF2,RF3 flavor
+    class TN1,TN2,TN3 node
+</div>
+
+<!-- ============================================ -->
+<!-- DIAGRAM 6: Migration Pipeline Detail        -->
+<!-- ============================================ -->
+<div class="section-title">AI-Storage Orchestrator: Migration Pipeline (50% CPU, 40% Memory 절감)</div>
+
+<div class="mermaid">
+%%{init: {'theme': 'dark', 'themeVariables': {'fontSize': '13px'}}}%%
+flowchart LR
+    subgraph ORIGINAL["<b>Original Pod</b><br/>Source Node"]
+        C1["Container A<br/>✅ running"]
+        C2["Container B<br/>✅ running"]
+        C3["Container C<br/>☑️ completed<br/>(exit 0)"]
+        C4["Container D<br/>❌ failed<br/>(exit 1)"]
+    end
+
+    ANALYZE["<b>1. captureContainerStates()</b><br/>컨테이너 상태 분석<br/>running → migrate ✓<br/>completed → skip ✗<br/>failed → migrate ✓"]
+
+    CHECKPOINT["<b>2. createCheckpoint()</b><br/>PVC 생성<br/>checkpoint-{pod}-{ts}<br/>1Gi ReadWriteOnce"]
+
+    subgraph OPTIMIZED["<b>Optimized Pod</b><br/>Target Node"]
+        OC1["Container A<br/>✅ running"]
+        OC2["Container B<br/>✅ running"]
+        OC4["Container D<br/>🔄 retry"]
+    end
+
+    DELETE["<b>4. deleteOriginalPod()</b><br/>30s gracePeriod"]
+
+    METRICS["<b>5. collectMetrics()</b><br/>CPU: 50% ↓<br/>Memory: 40% ↓<br/>Cold Start: 50% ↓"]
+
+    ORIGINAL --> ANALYZE
+    ANALYZE -->|"migrate: A, B, D<br/>skip: C"| CHECKPOINT
+    CHECKPOINT -->|"3. createOptimizedPod()<br/>5min timeout"| OPTIMIZED
+    ORIGINAL -.->|삭제| DELETE
+    OPTIMIZED --> METRICS
+
+    classDef running fill:#238636,stroke:#2ea043,color:#fff
+    classDef completed fill:#8b949e,stroke:#6e7681,color:#fff
+    classDef failed fill:#da3633,stroke:#f85149,color:#fff
+    classDef process fill:#1f3d5e,stroke:#1f6feb,color:#fff
+    classDef result fill:#3d3019,stroke:#9e6a03,color:#fff
+
+    class C1,C2,OC1,OC2 running
+    class C3 completed
+    class C4,OC4 failed
+    class ANALYZE,CHECKPOINT,DELETE process
+    class METRICS result
+</div>
+
+<div style="text-align:center; margin-top:40px; padding:20px; border-top:1px solid #30363d; color:#8b949e; font-size:12px;">
+    <p><b>KETI AI Storage Platform</b> &mdash; 한국전자기술연구원 (KETI)</p>
+    <p>IITP Grant No. RS-2024-00461572 | "AI 연산 가속기 최적화 고효율 병렬 스토리지 SW기술 개발"</p>
+    <p>January 2026</p>
+</div>
+
+</body>
+</html>

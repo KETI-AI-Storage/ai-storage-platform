@@ -1,0 +1,104 @@
+# 데모 전용 StorageClass + 정적 PV 풀.
+#
+# 목적: provisioning 정책이 만든 PVC 가 즉시 Bound 까지 도달하도록
+#       no-provisioner 형식의 정적 StorageClass 와 hostPath 기반 PV 를 사전 생성한다.
+#       실 운영 클러스터의 high-throughput / gluesys-csi 같은 외부 CSI 를 흉내내기 위한 데모용이다.
+#
+# Author: 미정
+# Created: 2026-05-26
+# Related: ai-storage-orchestrator/pkg/controller/provisioning.go (CreatePVC -> WaitForPVCReady)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  # WHY: orchestrator validateRequest 는 storage_class 화이트리스트
+  #      (high-throughput|high-iops|balanced|standard) 만 허용한다. 시연용 정적 SC
+  #      이름을 그 화이트리스트와 동일하게 맞춰 코드 패치 없이 동작하게 한다.
+  name: high-throughput
+  labels:
+    demo.keti.io/component: provisioning
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: Immediate
+reclaimPolicy: Delete
+---
+# WHY: Immediate + no-provisioner 조합이므로 PV 를 미리 만들어 두면
+#      동일 StorageClass + 동일 size + 호환 accessMode 의 PVC 가 즉시 Bound 된다.
+#      데모 반복용으로 5 개를 미리 띄운다.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: demo-provisioning-pv-1
+  labels:
+    demo.keti.io/component: provisioning
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: high-throughput
+  hostPath:
+    path: /tmp/demo-provisioning/pv-1
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: demo-provisioning-pv-2
+  labels:
+    demo.keti.io/component: provisioning
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: high-throughput
+  hostPath:
+    path: /tmp/demo-provisioning/pv-2
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: demo-provisioning-pv-3
+  labels:
+    demo.keti.io/component: provisioning
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: high-throughput
+  hostPath:
+    path: /tmp/demo-provisioning/pv-3
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: demo-provisioning-pv-4
+  labels:
+    demo.keti.io/component: provisioning
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: high-throughput
+  hostPath:
+    path: /tmp/demo-provisioning/pv-4
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: demo-provisioning-pv-5
+  labels:
+    demo.keti.io/component: provisioning
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: high-throughput
+  hostPath:
+    path: /tmp/demo-provisioning/pv-5
+    type: DirectoryOrCreate

@@ -1,0 +1,129 @@
+# =============================================================================
+# MutatingWebhookConfiguration
+#
+# 이 리소스가 K8s API Server에게 Pod/PVC 생성 시 웹훅을 호출하도록 등록.
+#
+# 핵심 필드 설명:
+#   clientConfig.service  : 웹훅 서버의 K8s Service 주소
+#   clientConfig.caBundle : 웹훅 서버 TLS 인증서를 서명한 CA의 공개키
+#   rules                 : 어떤 리소스의 어떤 동작에 대해 호출할지
+#   namespaceSelector     : 어떤 네임스페이스에서만 동작할지
+#   objectSelector        : 어떤 오브젝트에 대해 동작할지
+#
+# Webhook 분리 이유:
+#   - Pod 주입(scheduler/sidecar)과 PVC tier 주입은 결정 로직과 대상 리소스가
+#     서로 다르므로 webhook 자체를 두 개로 나눠 rules 를 분리한다.
+#   - 운영 정책상 두 webhook 모두 opt-in 으로 동작한다.
+#     → 두 webhook 모두 keti-ai-storage-injection=enabled 라벨이 붙은 ns 에서만 처리.
+#     → default 등 라벨이 없는 ns 는 DefaultStorageClass 등 기본 admission 만 동작.
+#
+# 동작 흐름:
+#   1. 사용자가 Pod/PVC 생성 요청 (kubectl apply)
+#   2. API Server 가 rules 조건 확인
+#   3. namespaceSelector 조건 확인
+#   4. objectSelector 조건 확인
+#   5. 조건 충족 시 → 웹훅 서버의 /mutate 경로로 POST 요청
+#   6. 웹훅이 JSON Patch 응답
+#   7. API Server 가 패치 적용 후 객체 생성
+# =============================================================================
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: ai-storage-webhook
+  labels:
+    app: ai-storage-webhook
+webhooks:
+
+# =============================================================================
+# Webhook #1 — Pod injection (sidecar + scheduler)
+# -----------------------------------------------------------------------------
+# 대상: Pod CREATE
+# 정책: keti-ai-storage-injection=enabled 라벨이 붙은 ns 에서만 동작 (opt-in)
+# 주입: schedulerName / shareProcessNamespace / insight-trace 사이드카
+# =============================================================================
+- name: ai-storage-pod-injection.keti.svc
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  failurePolicy: Ignore
+  reinvocationPolicy: IfNeeded
+  clientConfig:
+    service:
+      name: ai-storage-webhook
+      namespace: keti
+      path: "/mutate"
+      port: 443
+    caBundle: <CA_BUNDLE>
+
+  rules:
+  - apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+    operations: ["CREATE"]
+    scope: "Namespaced"
+
+  # ─────────────────────────────────────────────────
+  # namespaceSelector: opt-in
+  #   keti-ai-storage-injection=enabled 라벨이 있는 ns 에서만 Pod 주입.
+  # ─────────────────────────────────────────────────
+  namespaceSelector:
+    matchLabels:
+      keti-ai-storage-injection: enabled
+
+  # ─────────────────────────────────────────────────
+  # objectSelector: Pod 자체 라벨로 제외
+  #   keti-ai-storage-injection=disabled 가 박힌 Pod 는 건너뜀
+  #   (웹훅 서버 Pod, 시스템 Pod 등 보호용)
+  # ─────────────────────────────────────────────────
+  objectSelector:
+    matchExpressions:
+    - key: keti-ai-storage-injection
+      operator: NotIn
+      values: ["disabled"]
+
+# =============================================================================
+# Webhook #2 — PVC tier injection (storageClassName 자동 결정)
+# -----------------------------------------------------------------------------
+# 대상: PVC CREATE
+# 정책: keti-ai-storage-injection=enabled 라벨이 붙은 ns 에서만 동작 (opt-in)
+# 주입: ai-storage/selected-tier / selected-storage-class / tier-reason +
+#       spec.storageClassName (storage-l1/l2/l3/s3)
+# =============================================================================
+- name: ai-storage-pvc-injection.keti.svc
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  failurePolicy: Ignore
+  reinvocationPolicy: IfNeeded
+  clientConfig:
+    service:
+      name: ai-storage-webhook
+      namespace: keti
+      path: "/mutate"
+      port: 443
+    caBundle: <CA_BUNDLE>
+
+  rules:
+  - apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["persistentvolumeclaims"]
+    operations: ["CREATE"]
+    scope: "Namespaced"
+
+  # ─────────────────────────────────────────────────
+  # namespaceSelector: Pod webhook 과 동일한 opt-in 정책.
+  #   keti-ai-storage-injection=enabled 라벨이 있는 ns 에서만 PVC tier 주입.
+  #   default 등 라벨 없는 ns 는 통과시키지 않아 기본 DefaultStorageClass 가 그대로 적용된다.
+  # ─────────────────────────────────────────────────
+  namespaceSelector:
+    matchLabels:
+      keti-ai-storage-injection: enabled
+
+  # ─────────────────────────────────────────────────
+  # objectSelector: PVC 자체 라벨로 제외
+  #   keti-ai-storage-injection=disabled 가 박힌 PVC 는 건너뜀
+  #   (운영 중 PVC 를 보호해야 할 때 사용)
+  # ─────────────────────────────────────────────────
+  objectSelector:
+    matchExpressions:
+    - key: keti-ai-storage-injection
+      operator: NotIn
+      values: ["disabled"]
