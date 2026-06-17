@@ -6,4 +6,4 @@ resources:
 images:
   - name: ai-storage-metric-collector
     newName: ketidevit2/ai-storage-metric-collector
-    newTag: 7799585
+    newTag: "7799585"

@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           SHA=${GITHUB_SHA::7}
-          sed -i "s|newTag:.*|newTag: $SHA|" deploy/metric-collector/kustomization.yaml
+          sed -i "s|newTag:.*|newTag: \"$SHA\"|" deploy/metric-collector/kustomization.yaml
           git config user.name jja147
           git config user.email eci0584@gmail.com
           git add deploy/metric-collector/kustomization.yaml
