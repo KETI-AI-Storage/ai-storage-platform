@@ -1,7 +1,8 @@
 FROM golang:1.24.5 AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o metric-collector ./cmd/main.go
+# Module mode: the checked-in vendor/ dir is incomplete, so download deps.
+RUN GOFLAGS=-mod=mod go build -o metric-collector ./cmd/main.go
 
 FROM gcr.io/distroless/base
 COPY --from=builder /app/metric-collector /metric-collector
