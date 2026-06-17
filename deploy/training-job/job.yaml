@@ -4,10 +4,9 @@ metadata:
   name: training-job
   namespace: ai-storage-workloads
   annotations:
-    # Re-run on every ArgoCD sync (i.e. every new image from CI):
-    # ArgoCD deletes the previous Job before creating the new one.
-    argocd.argoproj.io/hook: Sync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    # A Job is immutable, so ArgoCD must delete+recreate it (not patch) when the
+    # image changes. Replace=true makes each new image (new commit) re-run training.
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 1800
