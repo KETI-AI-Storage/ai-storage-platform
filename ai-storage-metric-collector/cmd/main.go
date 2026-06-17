@@ -3,13 +3,19 @@ package main
 import (
 	"context"
 	"keti/ai-storage-metric-collector/pkg/collect"
+	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 )
 
+// version identifies the build; bumped to exercise the CI/CD pipeline.
+const version = "0.1.0"
+
 func main() {
+	log.Printf("ai-storage-metric-collector starting (version %s)", version)
+
 	quitChan := make(chan struct{})
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
