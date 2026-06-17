@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: training-job
+  namespace: ai-storage-workloads
+  annotations:
+    # Re-run on every ArgoCD sync (i.e. every new image from CI):
+    # ArgoCD deletes the previous Job before creating the new one.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 1800
+  template:
+    metadata:
+      labels:
+        app: training-job
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          # registry + tag are set by kustomize (CI bumps the tag per build)
+          image: training-job
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: EPOCHS
+              value: "20"
+            - name: LR
+              value: "0.1"

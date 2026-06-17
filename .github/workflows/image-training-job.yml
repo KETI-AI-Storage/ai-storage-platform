@@ -1,0 +1,50 @@
+name: image-training-job
+
+# Build the training-job image, push to Docker Hub, and bump the GitOps tag.
+# ArgoCD then re-runs the Job (Sync hook) with the new image.
+
+on:
+  push:
+    branches: [cicd-automation]
+    paths:
+      - 'training-job/**'
+      - '.github/workflows/image-training-job.yml'
+
+permissions:
+  contents: write   # to commit the bumped image tag back
+
+concurrency:
+  group: image-training-job
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        run: |
+          set -euo pipefail
+          IMG=ketidevit2/training-job
+          SHA=${GITHUB_SHA::7}
+          docker build -t "$IMG:$SHA" -t "$IMG:latest" training-job
+          docker push "$IMG:$SHA"
+          docker push "$IMG:latest"
+
+      - name: Bump GitOps image tag
+        run: |
+          set -euo pipefail
+          SHA=${GITHUB_SHA::7}
+          # quote the tag: an all-digit short SHA would otherwise parse as a YAML number
+          sed -i "s|newTag:.*|newTag: \"$SHA\"|" deploy/training-job/kustomization.yaml
+          git config user.name jja147
+          git config user.email eci0584@gmail.com
+          git add deploy/training-job/kustomization.yaml
+          git commit -m "deploy(training-job): image $SHA [skip ci]" || { echo "no change"; exit 0; }
+          git push

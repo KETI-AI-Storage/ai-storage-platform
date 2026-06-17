@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: training-job
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KETI-AI-Storage/ai-storage-platform.git
+    targetRevision: cicd-automation
+    path: deploy/training-job
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ai-storage-workloads
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
