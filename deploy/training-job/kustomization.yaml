@@ -6,4 +6,4 @@ resources:
 images:
   - name: training-job
     newName: ketidevit2/training-job
-    newTag: "latest"
+    newTag: "54772b7"
