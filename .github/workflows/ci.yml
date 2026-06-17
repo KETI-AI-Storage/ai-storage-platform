@@ -14,6 +14,10 @@ jobs:
   go:
     name: ${{ matrix.component }}
     runs-on: ubuntu-latest
+    env:
+      # Module mode: download dependencies. Some components ship an incomplete
+      # vendor/ dir, so -mod=vendor cannot be relied on.
+      GOFLAGS: -mod=mod
     strategy:
       fail-fast: false
       matrix:
@@ -35,21 +39,11 @@ jobs:
           go-version-file: ${{ matrix.component }}/go.mod
           cache-dependency-path: ${{ matrix.component }}/go.sum
 
-      - name: Resolve module flags
-        id: flags
-        # ai-storage-metric-collector vendors its deps; build/test it with -mod=vendor.
-        run: |
-          if [ -d vendor ]; then
-            echo "modflag=-mod=vendor" >> "$GITHUB_OUTPUT"
-          else
-            echo "modflag=" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build
-        run: go build ${{ steps.flags.outputs.modflag }} ./...
+        run: go build ./...
 
       - name: Test
-        run: go test ${{ steps.flags.outputs.modflag }} ./...
+        run: go test ./...
 
       # Lint is advisory for now: surface findings without failing the build.
       # Promote to a required check once the existing findings are cleared.
