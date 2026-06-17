@@ -5,5 +5,5 @@ resources:
   - daemonset.yaml
 images:
   - name: ai-storage-metric-collector
-    newName: ghcr.io/keti-ai-storage/ai-storage-metric-collector
+    newName: ketidevit2/ai-storage-metric-collector
     newTag: b1c2a35
