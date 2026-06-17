@@ -1,0 +1,61 @@
+name: CI
+
+# Build + test (required) and lint (advisory) for the Go components.
+# Image build, registry push and deployment are handled separately.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - ai-storage-scheduler
+          - ai-storage-orchestrator
+          - ai-storage-metric-collector
+          - ai-storage-webhook
+    defaults:
+      run:
+        working-directory: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Each component is an independent module on a different Go version;
+          # read the version from its own go.mod.
+          go-version-file: ${{ matrix.component }}/go.mod
+          cache-dependency-path: ${{ matrix.component }}/go.sum
+
+      - name: Resolve module flags
+        id: flags
+        # ai-storage-metric-collector vendors its deps; build/test it with -mod=vendor.
+        run: |
+          if [ -d vendor ]; then
+            echo "modflag=-mod=vendor" >> "$GITHUB_OUTPUT"
+          else
+            echo "modflag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        run: go build ${{ steps.flags.outputs.modflag }} ./...
+
+      - name: Test
+        run: go test ${{ steps.flags.outputs.modflag }} ./...
+
+      # Lint is advisory for now: surface findings without failing the build.
+      # Promote to a required check once the existing findings are cleared.
+      - name: Lint (advisory)
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v8
+        with:
+          working-directory: ${{ matrix.component }}
+          version: v2.5.0
