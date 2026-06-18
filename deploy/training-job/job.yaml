@@ -16,8 +16,8 @@ spec:
         app: training-job
     spec:
       restartPolicy: Never
-      nodeSelector:
-        nvidia.com/gpu.present: "true"   # GPU node (gpu-server-03)
+      # No nodeSelector needed: the nvidia.com/gpu resource request below only
+      # schedules onto a node advertising GPUs (gpu-server-03), via the device plugin.
       containers:
         - name: train
           image: training-job            # registry+tag set by kustomize (CI bumps)
