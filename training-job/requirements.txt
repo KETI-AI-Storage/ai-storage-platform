@@ -1,2 +1,2 @@
-# PyTorch (CUDA build) is installed in the Dockerfile.
+# PyTorch (CUDA build) comes from the base image (pytorch/pytorch ...-runtime).
 # Add extra deps here, e.g.: torchvision  numpy
