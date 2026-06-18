@@ -1,4 +1,2 @@
-# Add your model dependencies here, e.g.:
-#   numpy
-#   torch
-# (empty = pure-Python sample, fastest build)
+# PyTorch (CUDA build) is installed in the Dockerfile.
+# Add extra deps here, e.g.: torchvision  numpy

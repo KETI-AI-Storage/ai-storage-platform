@@ -4,8 +4,8 @@ metadata:
   name: training-job
   namespace: ai-storage-workloads
   annotations:
-    # A Job is immutable, so ArgoCD must delete+recreate it (not patch) when the
-    # image changes. Replace=true makes each new image (new commit) re-run training.
+    # A Job is immutable; Replace=true makes ArgoCD delete+recreate it so a new
+    # image (new commit) re-runs the training.
     argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 1
@@ -16,13 +16,22 @@ spec:
         app: training-job
     spec:
       restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.present: "true"   # GPU node (gpu-server-03)
       containers:
         - name: train
-          # registry + tag are set by kustomize (CI bumps the tag per build)
-          image: training-job
+          image: training-job            # registry+tag set by kustomize (CI bumps)
           imagePullPolicy: IfNotPresent
           env:
-            - name: EPOCHS
-              value: "20"
-            - name: LR
-              value: "0.1"
+            - {name: EPOCHS, value: "10"}
+            - {name: BATCH_SIZE, value: "256"}
+            - {name: OUTPUT_DIR, value: /data}
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {cpu: "8", memory: 16Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: training-job-data
