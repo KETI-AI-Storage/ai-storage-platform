@@ -1,0 +1,47 @@
+# Self-onboarding ApplicationSet.
+#
+# Reads deploy/*/appconfig.json and generates one ArgoCD Application per
+# component. To onboard a new component, add deploy/<name>/ with a
+# kustomization plus an appconfig.json declaring name/namespace/deployDir.
+# No new Application manifest and no manual `kubectl apply` needed.
+#
+# Per-workload differences (e.g. a Job needing recreate-on-change) live as a
+# resource-level annotation on the manifest itself:
+#   argocd.argoproj.io/sync-options: Replace=true,Force=true
+# so this template stays uniform across DaemonSet / Job / Deployment / etc.
+#
+# Supersedes the standalone deploy/argocd/*-application.yaml manifests; remove
+# those after cutover (see rollout notes).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: ai-storage-components
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/KETI-AI-Storage/ai-storage-platform.git
+        revision: cicd-automation
+        files:
+          - path: "deploy/*/appconfig.json"
+  template:
+    metadata:
+      name: "{{ .name }}"
+      namespace: argocd
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/KETI-AI-Storage/ai-storage-platform.git
+        targetRevision: cicd-automation
+        path: "{{ .deployDir }}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{ .namespace }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

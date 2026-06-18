@@ -1,0 +1,8 @@
+{
+  "name": "ai-storage-metric-collector",
+  "namespace": "monitoring",
+  "deployDir": "deploy/metric-collector",
+  "sourceDir": "ai-storage-metric-collector",
+  "dockerfile": "ai-storage-metric-collector/build/Dockerfile",
+  "image": "ketidevit2/ai-storage-metric-collector"
+}
