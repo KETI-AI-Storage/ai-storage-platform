@@ -76,13 +76,28 @@ jobs:
         run: |
           set -euo pipefail
           SHA=${GITHUB_SHA::7}
+          BRANCH=${GITHUB_REF_NAME}
           KUST=${{ matrix.component.deployDir }}/kustomization.yaml
-          # quote the tag: an all-digit short SHA would otherwise parse as a YAML number
-          sed -i "s|newTag:.*|newTag: \"$SHA\"|" "$KUST"
           git config user.name jja147
           git config user.email eci0584@gmail.com
-          # other matrix legs may push concurrently → rebase before pushing
-          git pull --rebase --autostash
-          git add "$KUST"
-          git commit -m "deploy(${{ matrix.component.name }}): image $SHA [skip ci]" || { echo "no tag change"; exit 0; }
-          git push
+          # Builds take minutes and sibling matrix legs push concurrently. Re-fetch
+          # the branch tip, re-apply the one-line bump, and retry the push so a
+          # non-fast-forward never fails the run. reset+push HEAD:$BRANCH also works
+          # from checkout's detached HEAD (where `git pull --rebase` has no upstream).
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin "$BRANCH"
+            git reset -q --hard "origin/$BRANCH"
+            # quote the tag: an all-digit short SHA would otherwise parse as a YAML number
+            sed -i "s|newTag:.*|newTag: \"$SHA\"|" "$KUST"
+            if git diff --quiet -- "$KUST"; then
+              echo "tag already at $SHA, nothing to push"; exit 0
+            fi
+            git add "$KUST"
+            git commit -q -m "deploy(${{ matrix.component.name }}): image $SHA [skip ci]"
+            if git push origin "HEAD:$BRANCH"; then
+              echo "pushed tag bump $SHA (attempt $attempt)"; exit 0
+            fi
+            echo "push rejected (attempt $attempt) — refetching and retrying"
+            sleep 3
+          done
+          echo "ERROR: could not push tag bump after 5 attempts"; exit 1
