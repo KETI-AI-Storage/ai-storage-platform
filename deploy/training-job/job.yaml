@@ -4,9 +4,10 @@ metadata:
   name: training-job
   namespace: ai-storage-workloads
   annotations:
-    # A Job is immutable; Replace=true makes ArgoCD delete+recreate it so a new
-    # image (new commit) re-runs the training.
-    argocd.argoproj.io/sync-options: Replace=true
+    # A Job's spec.selector/spec.template are immutable, so Replace=true alone
+    # (kubectl replace) fails. Force=true makes ArgoCD run `kubectl replace --force`
+    # = delete + recreate, so each new image (new commit) re-runs the training.
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
 spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 1800
