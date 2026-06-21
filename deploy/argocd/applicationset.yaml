@@ -39,6 +39,14 @@ spec:
       destination:
         server: https://kubernetes.default.svc
         namespace: "{{ .namespace }}"
+      # Kueue toggles a Job's spec.suspend during admission. Without this,
+      # selfHeal would see that as drift and Force-replace the Job in a loop.
+      # Harmless for non-Job components (they have no spec.suspend).
+      ignoreDifferences:
+        - group: batch
+          kind: Job
+          jsonPointers:
+            - /spec/suspend
       syncPolicy:
         automated:
           prune: true
