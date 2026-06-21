@@ -1,0 +1,7 @@
+{
+  "name": "cpu-eval",
+  "namespace": "ai-storage-workloads",
+  "deployDir": "deploy/cpu-eval",
+  "build": false,
+  "image": "python:3.12-slim"
+}

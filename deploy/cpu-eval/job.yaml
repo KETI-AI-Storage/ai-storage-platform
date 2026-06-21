@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cpu-eval
+  namespace: ai-storage-workloads
+  labels:
+    # Default-lane workload: no GPU/CSD request, so Kueue admits it under the
+    # first flavor (default-flavor) and it runs on any worker node.
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+  annotations:
+    # Replace+Force so each new commit re-runs the job (spec.template is immutable).
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 1800
+  template:
+    metadata:
+      labels:
+        app: cpu-eval
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: eval
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -c
+            - "print('default-lane: evaluating model on CPU', flush=True); import time; time.sleep(20); print('done', flush=True)"
+          resources:
+            requests: {cpu: "500m", memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}

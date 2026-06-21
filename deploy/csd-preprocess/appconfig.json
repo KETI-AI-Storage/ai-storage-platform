@@ -1,0 +1,7 @@
+{
+  "name": "csd-preprocess",
+  "namespace": "ai-storage-workloads",
+  "deployDir": "deploy/csd-preprocess",
+  "build": false,
+  "image": "busybox:1.36"
+}

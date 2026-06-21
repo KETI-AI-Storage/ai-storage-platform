@@ -36,7 +36,9 @@ jobs:
           sel = []
           for cfg in sorted(glob.glob('deploy/*/appconfig.json')):
               c = json.load(open(cfg))
-              src = c['sourceDir'].rstrip('/')
+              src = (c.get('sourceDir') or '').rstrip('/')
+              if not src:
+                  continue  # deploy-only workload (prebuilt/public image) — nothing to build
               if any(p == src or p.startswith(src + '/') for p in changed):
                   sel.append(c)
           print('any=' + ('true' if sel else 'false'))
