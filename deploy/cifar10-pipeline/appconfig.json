@@ -1,0 +1,8 @@
+{
+  "name": "cifar10-pipeline",
+  "namespace": "ai-storage-workloads",
+  "deployDir": "deploy/cifar10-pipeline",
+  "sourceDir": "cifar10",
+  "dockerfile": "cifar10/Dockerfile",
+  "image": "ketidevit2/cifar10"
+}

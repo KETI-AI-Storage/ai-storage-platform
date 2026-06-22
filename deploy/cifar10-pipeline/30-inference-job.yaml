@@ -1,0 +1,50 @@
+# Stage 3 (sync-wave 3): inference. Loads /data/checkpoints/cifar10_model.pt + test.pt,
+# runs GPU inference, writes results. Runs only after train (wave 2) completes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cifar10-inference-workload
+  namespace: ai-storage-workloads
+  labels:
+    app: cifar10-inference-workload
+    workload.keti.io/type: inference
+    workload.keti.io/framework: pytorch
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: cifar10-inference-workload
+        workload.keti.io/type: inference
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: inference
+    spec:
+      serviceAccountName: cifar10-workload
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpu-server-03
+      containers:
+        - name: inference
+          image: cifar10
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args: ["python3 -u /opt/workloads/cifar10_inference.py"]
+          env:
+            - {name: MAX_TEST_SAMPLES, value: "1000"}
+          resources:
+            requests: {cpu: "500m", memory: 2Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "2", memory: 6Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: preprocessed, mountPath: /data/preprocessed}
+            - {name: checkpoints, mountPath: /data/checkpoints}
+            - {name: result-log, mountPath: /data/results}
+            - {name: result-log, mountPath: /data/logs}
+      volumes:
+        - {name: preprocessed, persistentVolumeClaim: {claimName: cifar10-preprocessing-pvc}}
+        - {name: checkpoints, persistentVolumeClaim: {claimName: cifar10-checkpoint-pvc}}
+        - {name: result-log, persistentVolumeClaim: {claimName: cifar10-result-log-pvc}}

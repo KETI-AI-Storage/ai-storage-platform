@@ -1,0 +1,54 @@
+# Stage 1 (sync-wave 1): preprocess. Downloads CIFAR-10 (CIFAR10_DOWNLOAD=true) and
+# writes train.pt/test.pt to the preprocessing PVC. CPU only. Pinned to gpu-server-03
+# so the RWO PVCs bind there and the later GPU stages can mount them.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cifar10-preprocessing-workload
+  namespace: ai-storage-workloads
+  labels:
+    app: cifar10-preprocessing-workload
+    workload.keti.io/type: preprocessing
+    workload.keti.io/framework: pytorch
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: cifar10-preprocessing-workload
+        workload.keti.io/type: preprocessing
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: preprocess
+    spec:
+      serviceAccountName: cifar10-workload
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpu-server-03
+      containers:
+        - name: preprocess
+          image: cifar10
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args: ["python3 -u /opt/workloads/cifar10_preprocess.py"]
+          env:
+            - {name: CIFAR10_DOWNLOAD, value: "true"}
+            - {name: MAX_TRAIN_SAMPLES, value: "50000"}
+            - {name: MAX_TEST_SAMPLES, value: "10000"}
+          resources:
+            requests: {cpu: "500m", memory: 2Gi}
+            limits: {cpu: "2", memory: 6Gi}
+          volumeMounts:
+            - {name: raw-dataset, mountPath: /data/raw}
+            - {name: preprocessed, mountPath: /data/preprocessed}
+            - {name: cache, mountPath: /data/cache}
+            - {name: result-log, mountPath: /data/logs}
+      volumes:
+        - {name: raw-dataset, persistentVolumeClaim: {claimName: cifar10-raw-dataset-pvc}}
+        - {name: preprocessed, persistentVolumeClaim: {claimName: cifar10-preprocessing-pvc}}
+        - {name: cache, persistentVolumeClaim: {claimName: cifar10-cache-pvc}}
+        - {name: result-log, persistentVolumeClaim: {claimName: cifar10-result-log-pvc}}

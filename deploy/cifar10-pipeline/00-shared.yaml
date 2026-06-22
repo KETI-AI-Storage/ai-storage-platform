@@ -1,0 +1,107 @@
+# Shared resources for the cifar10 pipeline. ArgoCD sync-wave 0 (default) — applied
+# and made Healthy before the staged Jobs (waves 1->2->3) run.
+# Namespace omitted on purpose: the ApplicationSet syncs with CreateNamespace=true,
+# and we don't want ArgoCD to own/prune the shared ai-storage-workloads namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cifar10-workload
+  namespace: ai-storage-workloads
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cifar10-workload-pod-reader
+  namespace: ai-storage-workloads
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cifar10-workload-pod-reader
+  namespace: ai-storage-workloads
+subjects:
+  - kind: ServiceAccount
+    name: cifar10-workload
+    namespace: ai-storage-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cifar10-workload-pod-reader
+---
+# PVCs: storageClassName intentionally empty -> the ai-storage webhook injects the
+# StorageClass tier from the storage.keti.io/* hints below. This is the storage
+# orchestration the project demonstrates: each data role lands on its tier
+# (raw->mid, preprocessing->fast/low-latency, cache->ultra-low, checkpoint, archive).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-raw-dataset-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: dataset-ingest
+    storage.keti.io/data-role: raw-dataset
+    storage.keti.io/priority: medium
+    storage.keti.io/io-pattern: large-read
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: {requests: {storage: 2Gi}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-preprocessing-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: preprocessing
+    storage.keti.io/data-role: preprocessing-input
+    storage.keti.io/priority: high
+    storage.keti.io/io-pattern: large-read
+    storage.keti.io/latency: low
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: {requests: {storage: 4Gi}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-cache-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: preprocessing
+    storage.keti.io/data-role: cache
+    storage.keti.io/access-pattern: repeated
+    storage.keti.io/latency: ultra-low
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-checkpoint-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: training
+    storage.keti.io/data-role: intermediate
+    storage.keti.io/priority: medium
+    storage.keti.io/io-pattern: large-write
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: {requests: {storage: 4Gi}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cifar10-result-log-pvc
+  namespace: ai-storage-workloads
+  annotations:
+    storage.keti.io/workload-type: archive
+    storage.keti.io/data-role: result-backup
+    storage.keti.io/priority: low
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: {requests: {storage: 2Gi}}

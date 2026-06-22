@@ -1,0 +1,51 @@
+# Stage 2 (sync-wave 2): train. Reads /data/preprocessed/train.pt, trains SmallCifarCnn
+# on the GPU, writes /data/checkpoints/cifar10_model.pt. Runs only after preprocess
+# (wave 1) completes. GPU via nvidia.com/gpu -> gpu-flavor (Kueue) on gpu-server-03.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cifar10-training-workload
+  namespace: ai-storage-workloads
+  labels:
+    app: cifar10-training-workload
+    workload.keti.io/type: training
+    workload.keti.io/framework: pytorch
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: cifar10-training-workload
+        workload.keti.io/type: training
+        workload.keti.io/framework: pytorch
+      annotations:
+        mlops.keti.io/main-container: training
+    spec:
+      serviceAccountName: cifar10-workload
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpu-server-03
+      containers:
+        - name: training
+          image: cifar10
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc"]
+          args: ["python3 -u /opt/workloads/cifar10_train.py"]
+          env:
+            - {name: EPOCHS, value: "2"}
+            - {name: MAX_TRAIN_SAMPLES, value: "10000"}
+          resources:
+            requests: {cpu: "1", memory: 2Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "4", memory: 8Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: preprocessed, mountPath: /data/preprocessed}
+            - {name: checkpoints, mountPath: /data/checkpoints}
+            - {name: result-log, mountPath: /data/logs}
+      volumes:
+        - {name: preprocessed, persistentVolumeClaim: {claimName: cifar10-preprocessing-pvc}}
+        - {name: checkpoints, persistentVolumeClaim: {claimName: cifar10-checkpoint-pvc}}
+        - {name: result-log, persistentVolumeClaim: {claimName: cifar10-result-log-pvc}}
