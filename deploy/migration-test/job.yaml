@@ -23,11 +23,10 @@ spec:
         app: migration-test
     spec:
       restartPolicy: Never
-      # Pin to the node we will pressure, so this pod is the migration target on
-      # the node forecaster flags CRITICAL. (Scheduler still runs Filter/Score/Bind;
-      # drop this later to showcase scoring across feasible nodes.)
-      nodeSelector:
-        kubernetes.io/hostname: gpu-server-03
+      # No kubernetes.io/hostname pin: the orchestrator copies nodeSelector onto the
+      # migrated pod but places it on a DIFFERENT node, so a hostname pin makes the
+      # kubelet reject the migrated pod (NodeAffinity). Let ai-storage-scheduler place
+      # this pod, then pressure whichever node it lands on so target + load co-locate.
       containers:
         # COMPLETED container: exits 0 -> excluded from the migrated pod = the saving.
         - name: completed-step
