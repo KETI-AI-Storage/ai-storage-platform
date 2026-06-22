@@ -1,0 +1,8 @@
+{
+  "name": "migration-test",
+  "namespace": "ai-storage-workloads",
+  "deployDir": "deploy/migration-test",
+  "sourceDir": "migration-test",
+  "dockerfile": "migration-test/Dockerfile",
+  "image": "ketidevit2/migration-test"
+}

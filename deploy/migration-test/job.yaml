@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migration-test
+  namespace: ai-storage-workloads
+  labels:
+    # Routes this Job through Kueue. No GPU/CSD request -> default-flavor admission
+    # in ClusterQueue ai-storage-cluster-queue (LocalQueue ai-storage-queue).
+    kueue.x-k8s.io/queue-name: ai-storage-queue
+  annotations:
+    # A Job's spec.template is immutable, so each new image (new commit) needs a
+    # delete+recreate. Force=true makes ArgoCD run `kubectl replace --force`.
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  # backoffLimit 0: when the orchestrator deletes the original pod during
+  # migration, do NOT let the Job re-create a replacement (would churn the
+  # CRITICAL node and re-trigger policies). The test deletes the Job right after
+  # measuring savings anyway.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: migration-test
+    spec:
+      restartPolicy: Never
+      # Pin to the node we will pressure, so this pod is the migration target on
+      # the node forecaster flags CRITICAL. (Scheduler still runs Filter/Score/Bind;
+      # drop this later to showcase scoring across feasible nodes.)
+      nodeSelector:
+        kubernetes.io/hostname: gpu-server-03
+      containers:
+        # COMPLETED container: exits 0 -> excluded from the migrated pod = the saving.
+        - name: completed-step
+          image: migration-test            # registry+tag set by kustomize (CI bumps)
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: MODE, value: preprocess}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {cpu: "1", memory: 2Gi}
+        # RUNNING container: long-lived -> carried over to the target node.
+        - name: running-step
+          image: migration-test
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: MODE, value: serve}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          resources:
+            requests: {cpu: "1", memory: 3Gi}
+            limits: {cpu: "1", memory: 3Gi}
