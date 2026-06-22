@@ -6,4 +6,4 @@ resources:
 images:
   - name: migration-test
     newName: ketidevit2/migration-test
-    newTag: "latest"   # CI (image.yml) bumps this to the 7-char commit SHA on build
+    newTag: "20d40f1"
