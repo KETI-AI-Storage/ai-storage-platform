@@ -9,4 +9,4 @@ resources:
 images:
   - name: cifar10
     newName: ketidevit2/cifar10
-    newTag: "latest"   # CI (image.yml) bumps this to the 7-char commit SHA on build
+    newTag: "738b8bb"
