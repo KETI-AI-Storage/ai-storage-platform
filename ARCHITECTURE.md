@@ -6,7 +6,7 @@ This file documents the architecture and conventions of this repository.
 
 This is the **KETI AI Storage System** - a research-based Kubernetes infrastructure for AI workload optimization using Computational Storage Devices (CSD). The system consists of four main Go-based components that work together to provide intelligent pod scheduling, resource orchestration, and performance monitoring.
 
-**Core Innovation**: Integration of CSD (Computational Storage Device) resources into Kubernetes scheduling decisions, plus optimized pod migration that reduces CPU usage by 50% and memory by 40% by excluding completed containers during migration.
+**Core Innovation**: Integration of CSD (Computational Storage Device) resources into Kubernetes scheduling decisions, plus optimized pod migration that reduces CPU usage by 50% and memory by 40% by excluding completed containers during migration. (The 50%/40% figures are **request-based and hold by construction** — the optimized pod omits completed containers, so its summed requests drop by exactly their share; this is verified against pod requests in the E2E harness, not as an independent production load benchmark.)
 
 ## System Architecture
 
@@ -360,6 +360,12 @@ go mod download
 1. Component interdependencies not fully documented
 2. End-to-end integration testing strategy needed
 3. Performance benchmarks not automated
+4. **APOLLO forecaster is currently threshold-based, not trained ML.** The LightGBM/LSTM
+   model code exists but no models are trained or loaded at runtime, so forecasts fall back
+   to static thresholds (and the PPO scheduling policy runs untrained). Treat "intelligent
+   forecasting" as rule-based for now; training/loading real models is a follow-up track.
+5. Forecaster reads `cpu_requests/capacity` (allocation ratio), not live usage, for node
+   pressure signals.
 
 ## Research Context
 
@@ -373,3 +379,7 @@ Performance targets (vs standard Kubernetes):
 - CPU usage: 50% (50% reduction)
 - Memory usage: 60% (40% reduction)
 - Cold start time: 50% (50% reduction via PV checkpoints)
+
+Note: the CPU/memory reductions are achieved by excluding completed containers and are
+**request-based** (true by construction, verified against pod requests). They are not yet
+backed by an independent production load benchmark.
