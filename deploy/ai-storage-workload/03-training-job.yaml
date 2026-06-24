@@ -1,0 +1,95 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: training-vitforimageclassification-job
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: training-vit
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: training-vit
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: training
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir transformers torch numpy >/tmp/pip.log 2>&1
+              python - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+              import numpy as np
+              import torch
+              from transformers import ViTConfig, ViTForImageClassification
+
+              workload = os.environ["WORKLOAD_NAME"]
+              storage_root = os.environ["STORAGE_ROOT"]
+              input_path = os.environ["INPUT_PATH"]
+              output_path = os.environ["OUTPUT_PATH"]
+
+              input_abs = Path(storage_root + input_path)
+              output_abs = Path(storage_root + output_path)
+              output_abs.mkdir(parents=True, exist_ok=True)
+
+              data_path = input_abs / "vit_preprocessed_pixel_values.npy"
+              if data_path.exists():
+                  x = torch.from_numpy(np.load(data_path)).float()
+              else:
+                  x = torch.randn(1, 3, 32, 32)
+
+              config = ViTConfig(
+                  image_size=32,
+                  patch_size=16,
+                  hidden_size=64,
+                  num_hidden_layers=2,
+                  num_attention_heads=4,
+                  intermediate_size=128,
+                  num_labels=10,
+              )
+              model = ViTForImageClassification(config)
+              model.train()
+              y = torch.tensor([1], dtype=torch.long)
+              out = model(pixel_values=x, labels=y)
+              out.loss.backward()
+
+              model.save_pretrained(output_abs)
+              summary = output_abs / "training_summary.json"
+              summary.write_text(
+                  json.dumps(
+                      {"model": "ViTForImageClassification", "loss": float(out.loss.detach().cpu().item())},
+                      ensure_ascii=False,
+                      indent=2,
+                  )
+              )
+              size = summary.stat().st_size
+
+              print(f"workload_name={workload}")
+              print(f"input_path={input_path} ({input_abs})")
+              print(f"output_path={output_path} ({output_abs})")
+              print(f"generated_file={summary.name}")
+              print(f"file_size_bytes={size}")
+              PY
+          env:
+            - name: WORKLOAD_NAME
+              value: training
+            - name: STORAGE_ROOT
+              value: /mnt/ai-storage
+            - name: INPUT_PATH
+              value: /preprocessed
+            - name: OUTPUT_PATH
+              value: /training/models
+          volumeMounts:
+            - name: ai-storage
+              mountPath: /mnt/ai-storage
+      volumes:
+        - name: ai-storage
+          persistentVolumeClaim:
+            claimName: ai-storage-shared-pvc

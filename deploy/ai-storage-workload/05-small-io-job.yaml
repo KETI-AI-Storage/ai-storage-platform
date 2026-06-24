@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: small-io-cifar10-job
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: small-io-cifar10
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: small-io-cifar10
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: small-io
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              python - <<'PY'
+              import os
+              import json
+              from pathlib import Path
+
+              workload = os.environ["WORKLOAD_NAME"]
+              storage_root = os.environ["STORAGE_ROOT"]
+              input_path = os.environ["INPUT_PATH"]
+              output_path = os.environ["OUTPUT_PATH"]
+
+              input_abs = Path(storage_root + input_path)
+              output_abs = Path(storage_root + output_path)
+              input_abs.mkdir(parents=True, exist_ok=True)
+              output_abs.mkdir(parents=True, exist_ok=True)
+
+              raw_files = sorted(input_abs.glob("*"))
+              if not raw_files:
+                  seed = input_abs / "cifar10_seed.bin"
+                  seed.write_bytes(os.urandom(4096))
+                  raw_files = [seed]
+
+              copied = []
+              for idx in range(10):
+                  src = raw_files[idx % len(raw_files)]
+                  dst = output_abs / f"small_io_copy_{idx}.bin"
+                  dst.write_bytes(src.read_bytes()[:1024])
+                  copied.append(dst.name)
+
+              result_file = output_abs / "small_io_result.json"
+              result_file.write_text(json.dumps({"source_type": "CIFAR-10 small file read/write", "files": copied}, ensure_ascii=False, indent=2))
+              size = result_file.stat().st_size
+
+              print(f"workload_name={workload}")
+              print(f"input_path={input_path} ({input_abs})")
+              print(f"output_path={output_path} ({output_abs})")
+              print(f"generated_file={result_file.name}")
+              print(f"file_size_bytes={size}")
+              PY
+          env:
+            - name: WORKLOAD_NAME
+              value: small-io
+            - name: STORAGE_ROOT
+              value: /mnt/ai-storage
+            - name: INPUT_PATH
+              value: /raw
+            - name: OUTPUT_PATH
+              value: /io/small
+          volumeMounts:
+            - name: ai-storage
+              mountPath: /mnt/ai-storage
+      volumes:
+        - name: ai-storage
+          persistentVolumeClaim:
+            claimName: ai-storage-shared-pvc

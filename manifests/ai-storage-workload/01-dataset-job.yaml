@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dataset-cifar10-job
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: dataset-cifar10
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dataset-cifar10
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: dataset
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir datasets pillow >/tmp/pip.log 2>&1
+              python - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+              from datasets import load_dataset
+
+              workload = os.environ["WORKLOAD_NAME"]
+              storage_root = os.environ["STORAGE_ROOT"]
+              input_path = os.environ["INPUT_PATH"]
+              output_path = os.environ["OUTPUT_PATH"]
+
+              input_abs = Path("N/A") if input_path == "none" else Path(storage_root + input_path)
+              output_abs = Path(storage_root + output_path)
+              output_abs.mkdir(parents=True, exist_ok=True)
+
+              ds = load_dataset("cifar10", split="train[:3]")
+              saved = []
+              for idx, row in enumerate(ds):
+                  file_name = f"cifar10_sample_{idx}.png"
+                  out_file = output_abs / file_name
+                  row["img"].save(out_file)
+                  saved.append(file_name)
+
+              manifest = output_abs / "dataset_manifest.json"
+              manifest.write_text(json.dumps({"files": saved}, ensure_ascii=False, indent=2))
+              size = manifest.stat().st_size
+
+              print(f"workload_name={workload}")
+              print(f"input_path={input_path} ({input_abs})")
+              print(f"output_path={output_path} ({output_abs})")
+              print(f"generated_file={manifest.name}")
+              print(f"file_size_bytes={size}")
+              PY
+          env:
+            - name: WORKLOAD_NAME
+              value: dataset
+            - name: STORAGE_ROOT
+              value: /mnt/ai-storage
+            - name: INPUT_PATH
+              value: none
+            - name: OUTPUT_PATH
+              value: /raw
+          volumeMounts:
+            - name: ai-storage
+              mountPath: /mnt/ai-storage
+      volumes:
+        - name: ai-storage
+          persistentVolumeClaim:
+            claimName: ai-storage-shared-pvc

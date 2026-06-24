@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: checkpoint-vit-job
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: checkpoint-vit
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkpoint-vit
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: checkpoint
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir transformers torch >/tmp/pip.log 2>&1
+              python - <<'PY'
+              import os
+              import json
+              from pathlib import Path
+              import torch
+              from transformers import ViTConfig, ViTForImageClassification
+
+              workload = os.environ["WORKLOAD_NAME"]
+              storage_root = os.environ["STORAGE_ROOT"]
+              input_path = os.environ["INPUT_PATH"]
+              output_path = os.environ["OUTPUT_PATH"]
+
+              input_abs = Path(storage_root + input_path)
+              output_abs = Path(storage_root + output_path)
+              output_abs.mkdir(parents=True, exist_ok=True)
+
+              config = ViTConfig(
+                  image_size=32,
+                  patch_size=16,
+                  hidden_size=64,
+                  num_hidden_layers=2,
+                  num_attention_heads=4,
+                  intermediate_size=128,
+                  num_labels=10,
+              )
+              model = ViTForImageClassification(config)
+
+              ckpt_file = output_abs / "vit_checkpoint.pt"
+              torch.save(model.state_dict(), ckpt_file)
+              loaded = torch.load(ckpt_file, map_location="cpu")
+
+              result_file = output_abs / "checkpoint_result.json"
+              result_file.write_text(json.dumps({"loaded_tensors": len(loaded)}, ensure_ascii=False, indent=2))
+              size = ckpt_file.stat().st_size
+
+              print(f"workload_name={workload}")
+              print(f"input_path={input_path} ({input_abs})")
+              print(f"output_path={output_path} ({output_abs})")
+              print(f"generated_file={ckpt_file.name}")
+              print(f"file_size_bytes={size}")
+              PY
+          env:
+            - name: WORKLOAD_NAME
+              value: checkpoint
+            - name: STORAGE_ROOT
+              value: /mnt/ai-storage
+            - name: INPUT_PATH
+              value: /preprocessed
+            - name: OUTPUT_PATH
+              value: /training/checkpoints
+          volumeMounts:
+            - name: ai-storage
+              mountPath: /mnt/ai-storage
+      volumes:
+        - name: ai-storage
+          persistentVolumeClaim:
+            claimName: ai-storage-shared-pvc

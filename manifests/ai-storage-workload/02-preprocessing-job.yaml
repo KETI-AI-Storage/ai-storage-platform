@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: preprocessing-vitimageprocessor-job
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: preprocessing-vit
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: preprocessing-vit
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: preprocessing
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir transformers pillow numpy >/tmp/pip.log 2>&1
+              python - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+              import numpy as np
+              from PIL import Image
+              from transformers import ViTImageProcessor
+
+              workload = os.environ["WORKLOAD_NAME"]
+              storage_root = os.environ["STORAGE_ROOT"]
+              input_path = os.environ["INPUT_PATH"]
+              output_path = os.environ["OUTPUT_PATH"]
+
+              input_abs = Path(storage_root + input_path)
+              output_abs = Path(storage_root + output_path)
+              output_abs.mkdir(parents=True, exist_ok=True)
+
+              processor = ViTImageProcessor(size={"height": 32, "width": 32})
+              images = sorted(input_abs.glob("*.png"))
+              if not images:
+                  seed = Image.new("RGB", (32, 32), color=(127, 127, 127))
+                  seed_path = input_abs / "seed.png"
+                  input_abs.mkdir(parents=True, exist_ok=True)
+                  seed.save(seed_path)
+                  images = [seed_path]
+
+              image = Image.open(images[0]).convert("RGB")
+              data = processor(images=image, return_tensors="np")
+              out_file = output_abs / "vit_preprocessed_pixel_values.npy"
+              np.save(out_file, data["pixel_values"])
+
+              summary = output_abs / "preprocess_summary.json"
+              summary.write_text(json.dumps({"source_image": images[0].name}, ensure_ascii=False, indent=2))
+              size = out_file.stat().st_size
+
+              print(f"workload_name={workload}")
+              print(f"input_path={input_path} ({input_abs})")
+              print(f"output_path={output_path} ({output_abs})")
+              print(f"generated_file={out_file.name}")
+              print(f"file_size_bytes={size}")
+              PY
+          env:
+            - name: WORKLOAD_NAME
+              value: preprocessing
+            - name: STORAGE_ROOT
+              value: /mnt/ai-storage
+            - name: INPUT_PATH
+              value: /raw
+            - name: OUTPUT_PATH
+              value: /preprocessed
+          volumeMounts:
+            - name: ai-storage
+              mountPath: /mnt/ai-storage
+      volumes:
+        - name: ai-storage
+          persistentVolumeClaim:
+            claimName: ai-storage-shared-pvc

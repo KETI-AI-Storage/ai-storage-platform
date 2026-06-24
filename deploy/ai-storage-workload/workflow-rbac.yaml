@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default-editor
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: ai-storage-workload-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-storage-workflow-runner
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: ai-storage-workload-pipeline
+rules:
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - workflows
+      - workflowtaskresults
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-storage-workflow-runner
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: ai-storage-workload-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: default-editor
+    namespace: ai-storage-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ai-storage-workflow-runner

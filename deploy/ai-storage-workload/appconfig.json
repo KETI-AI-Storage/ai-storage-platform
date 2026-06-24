@@ -1,0 +1,7 @@
+{
+  "name": "ai-storage-workload",
+  "namespace": "ai-storage-workloads",
+  "deployDir": "deploy/ai-storage-workload",
+  "build": false,
+  "image": "python:3.11-slim"
+}

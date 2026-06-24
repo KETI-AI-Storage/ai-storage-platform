@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: large-io-llava-video-job
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: large-io-llava-video
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: large-io-llava-video
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: large-io
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              python - <<'PY'
+              import hashlib
+              import os
+              from pathlib import Path
+
+              workload = os.environ["WORKLOAD_NAME"]
+              storage_root = os.environ["STORAGE_ROOT"]
+              input_path = os.environ["INPUT_PATH"]
+              output_path = os.environ["OUTPUT_PATH"]
+
+              input_abs = Path(storage_root + input_path)
+              output_abs = Path(storage_root + output_path)
+              input_abs.mkdir(parents=True, exist_ok=True)
+              output_abs.mkdir(parents=True, exist_ok=True)
+
+              source = input_abs / "llava_video_sample.raw"
+              if not source.exists():
+                  source.write_bytes(os.urandom(16 * 1024 * 1024))
+
+              data = source.read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              out_file = output_abs / "llava_video_read_report.txt"
+              out_file.write_text(f"bytes={len(data)}\nsha256={digest}\n")
+              size = out_file.stat().st_size
+
+              print(f"workload_name={workload}")
+              print(f"input_path={input_path} ({input_abs})")
+              print(f"output_path={output_path} ({output_abs})")
+              print(f"generated_file={out_file.name}")
+              print(f"file_size_bytes={size}")
+              PY
+          env:
+            - name: WORKLOAD_NAME
+              value: large-io
+            - name: STORAGE_ROOT
+              value: /mnt/ai-storage
+            - name: INPUT_PATH
+              value: /raw
+            - name: OUTPUT_PATH
+              value: /io/large
+          volumeMounts:
+            - name: ai-storage
+              mountPath: /mnt/ai-storage
+      volumes:
+        - name: ai-storage
+          persistentVolumeClaim:
+            claimName: ai-storage-shared-pvc

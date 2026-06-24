@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: archive-cifar10-result-job
+  namespace: ai-storage-workloads
+  labels:
+    app.kubernetes.io/name: archive-cifar10
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: archive-cifar10
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: archive
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              python - <<'PY'
+              import os
+              import tarfile
+              from pathlib import Path
+
+              workload = os.environ["WORKLOAD_NAME"]
+              storage_root = os.environ["STORAGE_ROOT"]
+              input_path = os.environ["INPUT_PATH"]
+              output_path = os.environ["OUTPUT_PATH"]
+
+              input_abs = Path(storage_root + input_path)
+              output_abs = Path(storage_root + output_path)
+              output_abs.mkdir(parents=True, exist_ok=True)
+
+              src = input_abs / "inference_result.json"
+              if not src.exists():
+                  input_abs.mkdir(parents=True, exist_ok=True)
+                  src.write_text('{"status":"placeholder"}')
+
+              archive_file = output_abs / "cifar10_inference_archive.tar.gz"
+              with tarfile.open(archive_file, "w:gz") as tar:
+                  tar.add(src, arcname=src.name)
+              size = archive_file.stat().st_size
+
+              print(f"workload_name={workload}")
+              print(f"input_path={input_path} ({input_abs})")
+              print(f"output_path={output_path} ({output_abs})")
+              print(f"generated_file={archive_file.name}")
+              print(f"file_size_bytes={size}")
+              PY
+          env:
+            - name: WORKLOAD_NAME
+              value: archive
+            - name: STORAGE_ROOT
+              value: /mnt/ai-storage
+            - name: INPUT_PATH
+              value: /inference/results
+            - name: OUTPUT_PATH
+              value: /archive
+          volumeMounts:
+            - name: ai-storage
+              mountPath: /mnt/ai-storage
+      volumes:
+        - name: ai-storage
+          persistentVolumeClaim:
+            claimName: ai-storage-shared-pvc
