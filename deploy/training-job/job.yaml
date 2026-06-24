@@ -20,6 +20,8 @@ spec:
       labels:
         app: training-job
     spec:
+      nodeSelector:
+        keti.io/demo-hold: "true"
       restartPolicy: Never
       # No nodeSelector needed: the nvidia.com/gpu resource request below only
       # schedules onto a node advertising GPUs (gpu-server-03), via the device plugin.
