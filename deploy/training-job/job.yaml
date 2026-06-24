@@ -6,7 +6,7 @@ metadata:
   labels:
     # Routes this Job through Kueue. The GPU request below forces gpu-flavor
     # admission in ClusterQueue ai-storage-cluster-queue (LocalQueue ai-storage-queue).
-    kueue.x-k8s.io/queue-name: ai-storage-queue
+    kueue.x-k8s.io/queue-name: demo-admission-queue
   annotations:
     # A Job's spec.selector/spec.template are immutable, so Replace=true alone
     # (kubectl replace) fails. Force=true makes ArgoCD run `kubectl replace --force`
