@@ -29,13 +29,13 @@ spec:
   # resourceGroups: 리소스 그룹 정의 (단일 그룹으로 모든 리소스 관리)
   # ─────────────────────────────────────────────────────────────────────────
   resourceGroups:
-  - coveredResources: ["cpu", "memory"]
+  - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
     flavors:
 
     # ─────────────────────────────────────────────────────────────────────
     # Default Flavor - 일반 워커 노드
-    # 노드: ai-storage-worker-01
-    # 용도: 일반 워크로드
+    # node-role.kubernetes.io/worker="" 라벨 → csd-server-01·gpu-server-03 두 워커 모두 매칭
+    # 용도: 일반 워크로드 (특정 노드군 비지정)
     # ─────────────────────────────────────────────────────────────────────
     - name: default-flavor
       resources:
@@ -43,6 +43,8 @@ spec:
         nominalQuota: 16        # 최대 16 CPU 코어
       - name: memory
         nominalQuota: 32Gi      # 최대 32GB 메모리
+      - name: nvidia.com/gpu
+        nominalQuota: 0         # 이 flavor로는 GPU 미배분
 
     # ─────────────────────────────────────────────────────────────────────
     # CSD Flavor - Computational Storage Device 노드
@@ -55,6 +57,8 @@ spec:
         nominalQuota: 8         # 최대 8 CPU 코어
       - name: memory
         nominalQuota: 64Gi      # 최대 64GB 메모리
+      - name: nvidia.com/gpu
+        nominalQuota: 0         # CSD 노드엔 GPU 없음
 
     # ─────────────────────────────────────────────────────────────────────
     # GPU Flavor - GPU 탑재 노드
@@ -67,6 +71,8 @@ spec:
         nominalQuota: 32        # 최대 32 CPU 코어
       - name: memory
         nominalQuota: 64Gi      # 최대 64GB 메모리
+      - name: nvidia.com/gpu
+        nominalQuota: 2         # gpu-server-03: RTX A6000 ×2
 
   # ─────────────────────────────────────────────────────────────────────────
   # preemption: 선점 정책

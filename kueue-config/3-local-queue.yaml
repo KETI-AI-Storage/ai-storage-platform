@@ -6,16 +6,6 @@
 # =============================================================================
 
 ---
-# Kubeflow 사용자 네임스페이스용 LocalQueue
-apiVersion: kueue.x-k8s.io/v1beta1
-kind: LocalQueue
-metadata:
-  name: ai-storage-queue           # Job에서 참조할 이름
-  namespace: kubeflow-user-example-com
-spec:
-  clusterQueue: ai-storage-cluster-queue  # 연결할 ClusterQueue
-
----
 # Default 네임스페이스용 LocalQueue (테스트용)
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
@@ -32,5 +22,15 @@ kind: LocalQueue
 metadata:
   name: ai-storage-queue
   namespace: keti
+spec:
+  clusterQueue: ai-storage-cluster-queue
+
+---
+# AI Storage 워크로드 네임스페이스용 LocalQueue (실제 데모 경로 — 99 라이브와 일치)
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: ai-storage-queue
+  namespace: ai-storage-workloads
 spec:
   clusterQueue: ai-storage-cluster-queue
