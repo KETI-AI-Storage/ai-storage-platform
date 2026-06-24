@@ -1,0 +1,15 @@
+# Credential material — never commit tokens, keys, or kubeconfigs
+*.env
+.env
+secrets/
+*-credentials*
+# setup scripts (e.g. 02-setup-credentials.sh) are code, not secrets — re-include them
+!*-credentials*.sh
+*.token
+token
+**/token
+*.key
+kubeconfig*
+
+# package-internal monorepo clone (01-gitops)
+.monorepo/
