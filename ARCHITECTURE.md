@@ -4,13 +4,13 @@ This file documents the architecture and conventions of this repository.
 
 ## Project Overview
 
-This is the **KETI AI Storage System** - a research-based Kubernetes infrastructure for AI workload optimization using Computational Storage Devices (CSD). The system consists of four main Go-based components that work together to provide intelligent pod scheduling, resource orchestration, and performance monitoring.
+This is the **KETI AI Storage System** - a research-based Kubernetes infrastructure for AI workload optimization using Computational Storage Devices (CSD). It comprises several independent Go modules plus a Python forecaster that together provide intelligent pod scheduling, resource orchestration, admission-time mutation, and performance monitoring.
 
 **Core Innovation**: Integration of CSD (Computational Storage Device) resources into Kubernetes scheduling decisions, plus optimized pod migration that reduces CPU usage by 50% and memory by 40% by excluding completed containers during migration. (The 50%/40% figures are **request-based and hold by construction** — the optimized pod omits completed containers, so its summed requests drop by exactly their share; this is verified against pod requests in the E2E harness, not as an independent production load benchmark.)
 
 ## System Architecture
 
-The workspace contains 4 primary Go components that form a complete AI storage orchestration system:
+The workspace contains the following components — eight independent Go modules plus the Python forecaster inside APOLLO. Components #1–#3 are the historical scheduling/migration core; #4–#8 (webhook, APOLLO, and the insight-* observability stack) are equally part of the running system.
 
 ### 1. **ai-storage-scheduler** (Custom Kubernetes Scheduler)
 - **Purpose**: Custom K8s scheduler that considers CSD and GPU resources when placing pods
@@ -34,15 +34,39 @@ The workspace contains 4 primary Go components that form a complete AI storage o
 - **Entry Point**: `cmd/main.go`
 - **Architecture**: Long-running goroutine with graceful shutdown
 
-### 4. **ai-storage-api-server** (API Gateway)
-- **Purpose**: API server for AI Storage orchestration
-- **Status**: Documentation incomplete, needs investigation
-- **Entry Point**: `cmd/main.go`
+### 4. **ai-storage-webhook** (Mutating Admission Webhook)
+- **Purpose**: Mutates Pods/PVCs at admission to wire workloads into the platform
+- **Injects**: `schedulerName: ai-storage-scheduler`, the insight-trace sidecar, storage-tier labels (`selected-tier`, `storage.keti.io/*`), and Kueue queue labels; performs storage-tier scoring
+- **Module**: `keti/ai-storage-webhook` (core logic in `pkg/webhook/mutate.go`)
+- **Tests**: Best-tested component in the repo (~49 tests)
+- **Namespace**: `keti`
+
+### 5. **APOLLO** (Control Plane — `apollo/`)
+The intelligence/decision layer. One Go module (`apollo`) containing three services:
+- **node-resource-forecaster** (Python, gRPC `:50055`): forecasts node resource pressure. **Currently threshold-based** — the LightGBM/LSTM/PPO code exists but no models are trained or loaded at runtime, so it falls back to static thresholds and reads `cpu_requests/capacity` (allocation ratio), not live usage. See "Known Limitations and TODOs".
+- **orchestration-policy-engine** (Go): reconcile controller that turns forecaster signals into `OrchestrationPolicy` resources, which drive the orchestrator (migration / scaling / provisioning / ...).
+- **scheduling-policy-engine** (Go): supplies plugin weights to the scheduler (PPO untrained → effectively static).
+
+### 6. **insight-hub** (Resource-History Store — `insight-hub/`)
+- **Purpose**: SQLite-backed store for node/pod resource-history snapshots (store-and-replay; not a true aggregation layer despite the name)
+- **Receives**: `SubmitHistoryData` from insight-scope
+- **Namespace**: `keti`
+
+### 7. **insight-scope** (Workload Analysis & Storage Recommendation — `insight-scope/`)
+- **Purpose**: Analyzes workloads and recommends a storage tier (heuristic); collects node metrics and ships history to insight-hub
+- **Ports**: HTTP `:9092`, gRPC `:50054`
+- **Namespace**: `keti`
+
+### 8. **insight-trace** (Per-Pod Metrics Sidecar — `insight-trace/`)
+- **Purpose**: Sidecar (injected by the webhook) that collects per-pod cgroup/proc metrics and reports them to the orchestrator
+- **Namespace**: `keti` (runs alongside each workload pod)
+
+> **Note**: An `ai-storage-api-server` ("API Gateway") was previously listed here but is **not present** in the tree — treat it as never-shipped/removed.
 
 ## Building and Deploying
 
 ### General Pattern
-All four components follow a similar build pattern:
+Most Go components follow a similar build pattern (the Python forecaster in APOLLO is the exception):
 
 ```bash
 # Build binary (from component directory)
@@ -111,13 +135,42 @@ go build -o bin/metric-collector cmd/main.go
 ./scripts/deploy.sh
 ```
 
-#### AI Storage API Server
+#### AI Storage Webhook
 ```bash
-cd ai-storage-api-server
+cd ai-storage-webhook
 
-# Build and deploy using scripts (check scripts/ directory)
+# Generate TLS certs (first time), build image, deploy
+./scripts/generate-certs.sh
 ./scripts/build.sh
 ./scripts/deploy.sh
+
+# Run tests (best-tested component, ~49 tests)
+go test ./...
+```
+
+#### APOLLO (forecaster + policy engines)
+```bash
+cd apollo
+
+# Build all images (Go policy engines + Python forecaster) and deploy
+./scripts/build-images.sh   # or ./scripts/build.sh
+./scripts/deploy.sh
+
+# Regenerate gRPC stubs after editing protos
+./scripts/generate-proto.sh
+```
+
+#### Insight Stack (hub / scope / trace)
+```bash
+# insight-scope or insight-trace
+cd insight-scope   # or: cd insight-trace
+./scripts/build.sh
+./scripts/deploy.sh
+./scripts/logs.sh
+
+# insight-hub
+cd insight-hub
+./scripts/insight-hub.sh
 ```
 
 ### Prerequisites for All Components
@@ -290,10 +343,12 @@ func (p *MyPlugin) Filter(ctx context.Context, pod *v1.Pod, nodeInfo *utils.Node
 - **RBAC required**: Permissions for pods (get, create, delete), PVCs (create), metrics (get)
 
 ### Component Communication
-- Scheduler → Kubernetes API (scheduling decisions)
-- Orchestrator → Kubernetes API (pod migration, metrics)
+- Scheduler → Kubernetes API (scheduling decisions); APOLLO scheduling-policy-engine → Scheduler (plugin weights)
+- Orchestrator → Kubernetes API (pod migration, metrics); driven by APOLLO `OrchestrationPolicy` resources
 - Metric Collector → gRPC (presumably, needs investigation)
-- API Server → Unknown (needs investigation)
+- Webhook → admission requests from kube-apiserver (mutates Pods/PVCs)
+- insight-trace (sidecar) → Orchestrator (per-pod metrics reports)
+- insight-scope → insight-hub (`SubmitHistoryData`); APOLLO forecaster ← node history
 
 ## Project-Specific Conventions
 
