@@ -6,7 +6,7 @@ metadata:
   labels:
     # Default-lane workload: no GPU/CSD request, so Kueue admits it under the
     # first flavor (default-flavor) and it runs on any worker node.
-    kueue.x-k8s.io/queue-name: ai-storage-queue
+    kueue.x-k8s.io/queue-name: demo-admission-queue
   annotations:
     # Replace+Force so each new commit re-runs the job (spec.template is immutable).
     argocd.argoproj.io/sync-options: Replace=true,Force=true
@@ -18,6 +18,8 @@ spec:
       labels:
         app: cpu-eval
     spec:
+      nodeSelector:
+        keti.io/demo-hold: "true"
       restartPolicy: Never
       containers:
         - name: eval
