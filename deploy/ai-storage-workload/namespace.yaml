@@ -4,3 +4,7 @@ metadata:
   name: ai-storage-workloads
   labels:
     app.kubernetes.io/name: ai-storage-workloads
+    # webhook injection gate: ai-storage-webhook injects schedulerName=ai-storage-scheduler
+    # + insight-trace sidecar into pods here. Declared in git so ArgoCD selfHeal keeps it
+    # (otherwise selfHeal reverts the ns and strips the label, breaking KFP run-pod injection).
+    keti-ai-storage-injection: enabled
