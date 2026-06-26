@@ -6,5 +6,5 @@ resources:
   - job.yaml
 images:
   - name: training-job
-    newName: ketidevit2/training-job
-    newTag: "107b7f7"
+    newName: ketidevit2/training-job-cpu
+    newTag: "latest"

@@ -1,8 +1,8 @@
 {
-  "name": "training-job",
+  "name": "training-job-cpu",
   "namespace": "ai-storage-workloads",
   "deployDir": "deploy/training-job",
   "sourceDir": "training-job",
-  "dockerfile": "training-job/Dockerfile",
-  "image": "ketidevit2/training-job"
+  "dockerfile": "training-job/Dockerfile.cpu",
+  "image": "ketidevit2/training-job-cpu"
 }

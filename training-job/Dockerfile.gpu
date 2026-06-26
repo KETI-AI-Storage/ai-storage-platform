@@ -1,0 +1,8 @@
+# GPU 유형 — Blackwell(sm_120) 지원 torch 2.8.0/CUDA12.8(cu128). 같은 train.py(ViT).
+# RTX PRO 6000 Blackwell(sm_120, 96GB)에서 검증됨. torch/CUDA 베이크 → cold start 빠름.
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY train.py .
+ENTRYPOINT ["python", "-u", "train.py"]

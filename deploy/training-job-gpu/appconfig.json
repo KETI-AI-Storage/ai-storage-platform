@@ -1,0 +1,8 @@
+{
+  "name": "training-job-gpu",
+  "namespace": "ai-storage-workloads",
+  "deployDir": "deploy/training-job-gpu",
+  "sourceDir": "training-job",
+  "dockerfile": "training-job/Dockerfile.gpu",
+  "image": "ketidevit2/training-job-gpu"
+}
