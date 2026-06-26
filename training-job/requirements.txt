@@ -1,2 +1,4 @@
 # PyTorch (CUDA build) comes from the base image (pytorch/pytorch ...-runtime).
-# Add extra deps here, e.g.: torchvision  numpy
+# ViT training (ViTForImageClassification) needs HuggingFace transformers + numpy.
+transformers>=4.40,<5
+numpy

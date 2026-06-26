@@ -1,97 +1,86 @@
-"""PyTorch GPU training pipeline (reference).
+"""ViT training — same model as the AI-Storage KFP pipeline's training stage, moved
+into the GitOps image lane (commit -> CI build -> Docker Hub -> KFP/ArgoCD).
 
-A small CNN trained on a synthetic image-classification task so the job is
-self-contained (no dataset download). Uses CUDA when available. Replace
-`make_dataset` and the model with your real data/model — the build -> Docker Hub
--> ArgoCD GPU Job pipeline stays the same.
+The model is UNCHANGED from the pipeline: HuggingFace ViTForImageClassification with
+the exact same ViTConfig.  Only its location changed (inline string in kueue_job.py
+-> this train.py baked into the training-job image).
+
+I/O contract — works in BOTH lanes:
+  • KFP pipeline step: env STORAGE_ROOT + INPUT_PATH + OUTPUT_PATH.  Reads the
+    preprocessed pixel values produced by the upstream preprocessing stage and writes
+    the trained model + summary under STORAGE_ROOT+OUTPUT_PATH (…/training).
+  • Standalone GitOps Job: env OUTPUT_DIR (default /data), no INPUT_PATH -> falls back
+    to a random sample so the Job is self-contained.
+Env: EPOCHS (default 1).  GPU is used automatically when visible.
 """
 import json
 import os
-import time
+from pathlib import Path
 
+import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from transformers import ViTConfig, ViTForImageClassification
 
 
-def make_dataset(n, img=32, ch=3, classes=10, seed=0):
-    g = torch.Generator().manual_seed(seed)
-    protos = torch.randn(classes, ch, img, img, generator=g)
-    y = torch.randint(0, classes, (n,), generator=g)
-    x = protos[y] + 0.8 * torch.randn(n, ch, img, img, generator=g)
-    return TensorDataset(x, y)
+def resolve_io():
+    storage_root = os.getenv("STORAGE_ROOT", "")
+    input_path = os.getenv("INPUT_PATH", "")
+    output_path = os.getenv("OUTPUT_PATH", "")
+    # output: KFP (STORAGE_ROOT+OUTPUT_PATH) preferred, else OUTPUT_DIR (gitops), else /data
+    out = Path(storage_root + output_path) if (storage_root and output_path) \
+        else Path(os.getenv("OUTPUT_DIR", "/data"))
+    inp = Path(storage_root + input_path) if (storage_root and input_path) else None
+    return inp, out
 
 
-class CNN(nn.Module):
-    def __init__(self, ch=3, classes=10):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(ch, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
-        )
-        self.classifier = nn.Linear(128, classes)
-
-    def forward(self, x):
-        return self.classifier(self.features(x).flatten(1))
+def load_pixels(inp, device):
+    if inp is not None:
+        f = inp / "vit_preprocessed_pixel_values.npy"
+        if f.exists():
+            print(f"[train] loading preprocessed input: {f}", flush=True)
+            return torch.from_numpy(np.load(f)).float().to(device)
+    print("[train] no preprocessed input -> random sample (self-contained)", flush=True)
+    return torch.randn(1, 3, 32, 32, device=device)
 
 
 def main():
-    epochs = int(os.getenv("EPOCHS", "10"))
-    batch = int(os.getenv("BATCH_SIZE", "256"))
-    lr = float(os.getenv("LR", "0.001"))
+    epochs = int(os.getenv("EPOCHS", "1"))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[train] torch={torch.__version__} cuda={torch.cuda.is_available()} device={device}", flush=True)
     if device == "cuda":
         p = torch.cuda.get_device_properties(0)
-        print(f"[train] GPU={p.name} mem={p.total_memory/1e9:.0f}GB cc=sm_{p.major}{p.minor} "
-              f"count={torch.cuda.device_count()}", flush=True)
-    else:
-        print("[train] WARNING: no GPU visible, running on CPU", flush=True)
+        print(f"[train] GPU={p.name} mem={p.total_memory/1e9:.0f}GB cc=sm_{p.major}{p.minor}", flush=True)
 
-    train_dl = DataLoader(make_dataset(10000, seed=1), batch_size=batch, shuffle=True,
-                          num_workers=2, pin_memory=(device == "cuda"))
-    xt, yt = make_dataset(2000, seed=2).tensors
-    xt, yt = xt.to(device), yt.to(device)
+    inp, out = resolve_io()
+    out.mkdir(parents=True, exist_ok=True)
+    x = load_pixels(inp, device)
 
-    model = CNN().to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    lossf = nn.CrossEntropyLoss()
-    use_amp = (device == "cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    # ── UNCHANGED model: exact same ViTConfig as the pipeline's inline stage ──
+    config = ViTConfig(
+        image_size=32, patch_size=16, hidden_size=64,
+        num_hidden_layers=2, num_attention_heads=4,
+        intermediate_size=128, num_labels=10,
+    )
+    model = ViTForImageClassification(config).to(device)
+    model.train()
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    y = torch.tensor([1] * x.shape[0], dtype=torch.long, device=device)
 
-    t0, acc = time.time(), 0.0
+    last_loss = 0.0
     for ep in range(1, epochs + 1):
-        model.train()
-        total, count = 0.0, 0
-        for x, y in train_dl:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-            opt.zero_grad()
-            with torch.autocast(device_type=device, enabled=use_amp):
-                loss = lossf(model(x), y)
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
-            total += loss.item() * len(y)
-            count += len(y)
-        model.eval()
-        with torch.no_grad():
-            acc = (model(xt).argmax(1) == yt).float().mean().item()
-        mem = torch.cuda.max_memory_allocated() / 1e9 if device == "cuda" else 0.0
-        print(f"[train] epoch {ep}/{epochs} loss={total/count:.4f} test_acc={acc:.3f} "
-              f"gpu_mem={mem:.2f}GB ({time.time()-t0:.1f}s)", flush=True)
+        opt.zero_grad()
+        res = model(pixel_values=x, labels=y)
+        res.loss.backward()
+        opt.step()
+        last_loss = float(res.loss.detach().cpu().item())
+        print(f"[train] epoch {ep}/{epochs} loss={last_loss:.4f}", flush=True)
 
-    out_dir = os.getenv("OUTPUT_DIR", "/data")
-    metrics = {"final_acc": round(acc, 4), "epochs": epochs, "device": device,
-               "params": sum(p.numel() for p in model.parameters())}
-    print(f"[train] DONE metrics={json.dumps(metrics)}", flush=True)
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        torch.save(model.state_dict(), os.path.join(out_dir, "model.pt"))
-        json.dump(metrics, open(os.path.join(out_dir, "metrics.json"), "w"))
-        print(f"[train] saved checkpoint -> {out_dir}/model.pt", flush=True)
-    except OSError as e:
-        print(f"[train] no writable output dir ({e})", flush=True)
+    model.save_pretrained(out)
+    summary = out / "training_summary.json"
+    summary.write_text(json.dumps(
+        {"model": "ViTForImageClassification", "loss": last_loss, "epochs": epochs, "device": device},
+        ensure_ascii=False, indent=2))
+    print(f"[train] DONE model=ViTForImageClassification loss={last_loss:.4f} epochs={epochs} -> {out}", flush=True)
 
 
 if __name__ == "__main__":
