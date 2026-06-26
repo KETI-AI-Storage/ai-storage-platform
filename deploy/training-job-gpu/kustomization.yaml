@@ -3,4 +3,4 @@ kind: Kustomization
 images:
   - name: training-job-gpu
     newName: ketidevit2/training-job-gpu
-    newTag: "latest"
+    newTag: "4ae0ff4"
