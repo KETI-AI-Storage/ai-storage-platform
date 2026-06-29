@@ -7,4 +7,4 @@ resources:
 images:
   - name: training-job
     newName: ketidevit2/training-job-cpu
-    newTag: "4ae0ff4"
+    newTag: "2a1b25d"
