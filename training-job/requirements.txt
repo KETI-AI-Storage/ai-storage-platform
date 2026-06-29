@@ -1,5 +1,5 @@
-# torch + CUDA(Blackwell sm_120) 는 베이스 이미지(pytorch ...-cuda12.8)에서 온다.
-# ViT 학습(ViTForImageClassification) + CIFAR-10 로딩에 필요한 추가 의존성만:
+# torch + CUDA(Blackwell)는 베이스(또는 cpu-wheel)에서. ViT 학습 + CIFAR-10 디코딩용:
 transformers>=4.40,<5
 numpy
 datasets
+pillow
