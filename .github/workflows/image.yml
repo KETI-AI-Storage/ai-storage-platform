@@ -8,7 +8,7 @@ name: image
 
 on:
   push:
-    branches: [cicd-automation]
+    branches: [cicd-automation, cicd-82]
 
 permissions:
   contents: write   # to commit the bumped image tag back
