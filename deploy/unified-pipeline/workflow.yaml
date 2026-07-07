@@ -1,0 +1,59 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: unified-pipeline
+  namespace: ai-storage-workloads
+spec:
+  entrypoint: dag
+  serviceAccountName: unified-pipeline-runner
+  # generous so the Workflow survives the Kueue hold window until released
+  activeDeadlineSeconds: 3600
+  ttlStrategy:
+    secondsAfterCompletion: 3600
+  templates:
+    - name: dag
+      dag:
+        tasks:
+          - name: preprocess
+            template: preprocess
+          - name: train
+            template: train
+            dependencies: [preprocess]
+    - name: preprocess
+      container:
+        image: python:3.11-slim
+        command: [sh, -c]
+        args: ["echo '[preprocess] CIFAR preprocessing marker (PoC)'; sleep 5; echo '[preprocess] done'"]
+    - name: train
+      resource:
+        action: create
+        setOwnerReference: true
+        successCondition: status.succeeded > 0
+        failureCondition: status.failed > 0
+        manifest: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            generateName: unified-train-
+            namespace: ai-storage-workloads
+            labels:
+              kueue.x-k8s.io/queue-name: unified-hold-queue
+              app: unified-train
+          spec:
+            backoffLimit: 0
+            template:
+              metadata:
+                labels: {app: unified-train}
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: train
+                    image: ketidevit2/training-job-cpu:2a1b25d
+                    imagePullPolicy: IfNotPresent
+                    env:
+                      - {name: EPOCHS, value: "1"}
+                      - {name: BATCH_SIZE, value: "64"}
+                      - {name: OUTPUT_DIR, value: /tmp/out}
+                    resources:
+                      requests: {cpu: "2", memory: 4Gi}
+                      limits: {cpu: "4", memory: 8Gi}
