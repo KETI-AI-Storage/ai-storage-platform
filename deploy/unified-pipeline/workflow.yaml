@@ -3,6 +3,11 @@ kind: Workflow
 metadata:
   name: unified-pipeline
   namespace: ai-storage-workloads
+  labels:
+    # Partition this Workflow to the standalone Argo controller (argo ns, instanceID=unified)
+    # so it does NOT clash with the cluster-scoped KFP workflow-controller (kubeflow ns,
+    # empty instanceID) that multi-user KFP requires. See kfp-multiuser coexistence.
+    workflows.argoproj.io/controller-instanceid: unified
 spec:
   entrypoint: dag
   serviceAccountName: unified-pipeline-runner
